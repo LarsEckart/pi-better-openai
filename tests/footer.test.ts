@@ -36,6 +36,7 @@ function writeProjectConfig(cwd: string, footerMode: "replace" | "status" | "off
         usage: { enabled: false },
         footer: { mode: footerMode },
         image: { enabled: false },
+        pets: { enabled: false },
       },
       null,
       2,

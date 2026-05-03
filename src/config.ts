@@ -6,6 +6,24 @@ import { CONFIG_BASENAME, logPrefix } from "./identity.ts";
 export const FOOTER_MODES = ["replace", "status", "off"] as const;
 export const IMAGE_SAVE_MODES = ["none", "project", "global", "custom"] as const;
 export const IMAGE_OUTPUT_FORMATS = ["png", "jpeg", "webp"] as const;
+export const PET_PLACEMENTS = [
+  "stacked",
+  "inline-left",
+  "inline-right",
+  "badge",
+  "habitat",
+] as const;
+export const PET_STATES = [
+  "idle",
+  "running-right",
+  "running-left",
+  "waving",
+  "jumping",
+  "failed",
+  "waiting",
+  "running",
+  "review",
+] as const;
 
 export const DEFAULT_SUPPORTED_MODELS = [
   "openai/gpt-5.4",
@@ -17,6 +35,8 @@ export const DEFAULT_SUPPORTED_MODELS = [
 export type FooterMode = (typeof FOOTER_MODES)[number];
 export type ImageSaveMode = (typeof IMAGE_SAVE_MODES)[number];
 export type ImageOutputFormat = (typeof IMAGE_OUTPUT_FORMATS)[number];
+export type PetPlacement = (typeof PET_PLACEMENTS)[number];
+export type PetState = (typeof PET_STATES)[number];
 
 export type UsageConfig = {
   enabled?: boolean;
@@ -37,6 +57,19 @@ export type ImageConfig = {
   timeoutMs?: number;
 };
 
+export type PetConfig = {
+  enabled?: boolean;
+  slug?: string;
+  placement?: PetPlacement;
+  state?: PetState;
+  thinkingState?: PetState;
+  toolState?: PetState;
+  failedToolState?: PetState;
+  idleEmotes?: boolean;
+  idleEmoteIntervalMs?: number;
+  sizeCells?: number;
+};
+
 export interface ConfigFile {
   persistState?: boolean;
   active?: boolean;
@@ -45,6 +78,7 @@ export interface ConfigFile {
   usage?: UsageConfig;
   footer?: FooterConfig;
   image?: ImageConfig;
+  pets?: PetConfig;
 }
 
 export interface SupportedModel {
@@ -65,6 +99,7 @@ export interface ResolvedConfig {
   usage: Required<UsageConfig>;
   footer: Required<FooterConfig>;
   image: Required<ImageConfig>;
+  pets: Required<PetConfig>;
 }
 
 export const DEFAULT_USAGE_CONFIG: Required<UsageConfig> = {
@@ -86,6 +121,19 @@ export const DEFAULT_IMAGE_CONFIG: Required<ImageConfig> = {
   timeoutMs: 180_000,
 };
 
+export const DEFAULT_PET_CONFIG: Required<PetConfig> = {
+  enabled: false,
+  slug: "",
+  placement: "inline-right",
+  state: "idle",
+  thinkingState: "review",
+  toolState: "running",
+  failedToolState: "failed",
+  idleEmotes: true,
+  idleEmoteIntervalMs: 30_000,
+  sizeCells: 10,
+};
+
 export const DEFAULT_CONFIG: ConfigFile = {
   persistState: true,
   active: false,
@@ -94,6 +142,7 @@ export const DEFAULT_CONFIG: ConfigFile = {
   usage: DEFAULT_USAGE_CONFIG,
   footer: DEFAULT_FOOTER_CONFIG,
   image: DEFAULT_IMAGE_CONFIG,
+  pets: DEFAULT_PET_CONFIG,
 };
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -189,6 +238,41 @@ export function readConfig(path: string): ConfigFile | undefined {
       config.image.outputFormat = parsed.image.outputFormat as ImageOutputFormat;
     if (typeof parsed.image.timeoutMs === "number") config.image.timeoutMs = parsed.image.timeoutMs;
   }
+  if (isRecord(parsed.pets)) {
+    config.pets = {};
+    if (typeof parsed.pets.enabled === "boolean") config.pets.enabled = parsed.pets.enabled;
+    if (typeof parsed.pets.slug === "string") config.pets.slug = parsed.pets.slug.trim();
+    if (
+      typeof parsed.pets.placement === "string" &&
+      (PET_PLACEMENTS as readonly string[]).includes(parsed.pets.placement)
+    )
+      config.pets.placement = parsed.pets.placement as PetPlacement;
+    if (
+      typeof parsed.pets.state === "string" &&
+      (PET_STATES as readonly string[]).includes(parsed.pets.state)
+    )
+      config.pets.state = parsed.pets.state as PetState;
+    if (
+      typeof parsed.pets.thinkingState === "string" &&
+      (PET_STATES as readonly string[]).includes(parsed.pets.thinkingState)
+    )
+      config.pets.thinkingState = parsed.pets.thinkingState as PetState;
+    if (
+      typeof parsed.pets.toolState === "string" &&
+      (PET_STATES as readonly string[]).includes(parsed.pets.toolState)
+    )
+      config.pets.toolState = parsed.pets.toolState as PetState;
+    if (
+      typeof parsed.pets.failedToolState === "string" &&
+      (PET_STATES as readonly string[]).includes(parsed.pets.failedToolState)
+    )
+      config.pets.failedToolState = parsed.pets.failedToolState as PetState;
+    if (typeof parsed.pets.idleEmotes === "boolean")
+      config.pets.idleEmotes = parsed.pets.idleEmotes;
+    if (typeof parsed.pets.idleEmoteIntervalMs === "number")
+      config.pets.idleEmoteIntervalMs = parsed.pets.idleEmoteIntervalMs;
+    if (typeof parsed.pets.sizeCells === "number") config.pets.sizeCells = parsed.pets.sizeCells;
+  }
   return config;
 }
 
@@ -260,6 +344,29 @@ export function resolveConfig(cwd: string): ResolvedConfig {
           projectConfig.image?.timeoutMs ??
             globalConfig.image?.timeoutMs ??
             DEFAULT_IMAGE_CONFIG.timeoutMs,
+        ),
+      ),
+    },
+    pets: {
+      ...DEFAULT_PET_CONFIG,
+      ...globalConfig.pets,
+      ...projectConfig.pets,
+      idleEmoteIntervalMs: Math.max(
+        5_000,
+        Math.min(
+          5 * 60_000,
+          projectConfig.pets?.idleEmoteIntervalMs ??
+            globalConfig.pets?.idleEmoteIntervalMs ??
+            DEFAULT_PET_CONFIG.idleEmoteIntervalMs,
+        ),
+      ),
+      sizeCells: Math.max(
+        4,
+        Math.min(
+          16,
+          projectConfig.pets?.sizeCells ??
+            globalConfig.pets?.sizeCells ??
+            DEFAULT_PET_CONFIG.sizeCells,
         ),
       ),
     },

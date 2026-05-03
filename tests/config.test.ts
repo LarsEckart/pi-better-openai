@@ -10,6 +10,13 @@ describe("config helpers", () => {
     expect(_test.CONFIG_BASENAME).toBe("pi-better-openai.json");
     expect(_test.DEFAULT_CONFIG.desiredActive).toBe(false);
     expect(_test.DEFAULT_IMAGE_CONFIG.defaultSave).toBe("project");
+    expect(_test.DEFAULT_PET_CONFIG.placement).toBe("inline-right");
+    expect(_test.DEFAULT_PET_CONFIG.state).toBe("idle");
+    expect(_test.DEFAULT_PET_CONFIG.thinkingState).toBe("review");
+    expect(_test.DEFAULT_PET_CONFIG.toolState).toBe("running");
+    expect(_test.DEFAULT_PET_CONFIG.failedToolState).toBe("failed");
+    expect(_test.DEFAULT_PET_CONFIG.idleEmotes).toBe(true);
+    expect(_test.DEFAULT_PET_CONFIG.idleEmoteIntervalMs).toBe(30000);
     expect(_test.DEFAULT_SUPPORTED_MODELS).toEqual([
       "openai/gpt-5.4",
       "openai/gpt-5.5",

@@ -23,11 +23,40 @@ pi install npm:pi-better-openai
 - Interactive settings picker via `/openai-settings`.
 - Footer customization for model, thinking, fast mode, usage, and token/cost context.
 - OpenAI image generation/editing through the `openai_image` tool and `/openai-image` command.
+- Animated Codex custom pets rendered in the Better OpenAI footer.
 - Commands:
   - `/fast` toggles fast mode.
   - `/openai-image <prompt>` generates an image directly.
+  - `/pets [help|list|wake [slug]|tuck|select <slug>]` renders or manages custom pets from `${CODEX_HOME:-~/.codex}/pets`.
   - `/openai-usage` shows current OpenAI subscription usage.
   - `/openai-settings` opens settings, diagnostics, and config details.
+
+## Codex pets
+
+Codex pets are an OpenAI Codex app feature, so the floating overlay and pet picker are still controlled by Codex (`Settings → Appearance → Pets` or `/pet`). This extension can also render compatible custom pet spritesheets directly in pi's Better OpenAI footer.
+
+```bash
+/pets wake          # render the first ready custom pet
+/pets wake <slug>   # render a specific pet
+/pets tuck          # hide it
+/pets list          # list local custom pets
+```
+
+You can also enable **Footer pet** in `/openai-settings` and tune placement (`inline-right` by default), idle, thinking/streaming, tool-execution, and any failed-tool animation states, plus random idle emotes and size.
+
+To create a custom pet for the Codex app:
+
+```bash
+$skill-installer hatch-pet
+```
+
+Then reload Codex skills (`Cmd/Ctrl+K → Force Reload Skills`) and ask:
+
+```text
+$hatch-pet create a new pet inspired by pi-better-openai
+```
+
+Custom pets should end up in `${CODEX_HOME:-~/.codex}/pets/<pet-name>/` with `pet.json` and `spritesheet.webp`. Refresh custom pets in Codex settings and toggle the overlay with `/pet`.
 
 ## Screenshots
 
