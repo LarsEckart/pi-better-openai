@@ -9,7 +9,14 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
-import { Container, getCellDimensions, Key, matchesKey, SettingsList } from "@mariozechner/pi-tui";
+import {
+  Container,
+  getCapabilities,
+  getCellDimensions,
+  Key,
+  matchesKey,
+  SettingsList,
+} from "@mariozechner/pi-tui";
 import { CONFIG_BASENAME, STATUS_KEY } from "./src/identity.ts";
 import { formatTokens, sanitizeStatusText, truncateToWidth, visibleWidth } from "./src/format.ts";
 import {
@@ -137,13 +144,13 @@ function padTextToWidth(value: string, width: number): string {
   return value + spaces(width - visibleWidth(value));
 }
 
-function isKittyGraphicsLine(line: string): boolean {
-  return line.includes("\x1b_G");
+function isTerminalImageLine(line: string): boolean {
+  return line.includes("\x1b_G") || line.includes("\x1b]1337;File=");
 }
 
 function petLineCell(line: string, width: number): string {
   if (!line) return spaces(width);
-  if (isKittyGraphicsLine(line)) return line + spaces(width);
+  if (isTerminalImageLine(line)) return `\x1b[0m${line}`;
   const clipped = truncateToWidth(line, width, "");
   return clipped + spaces(width - visibleWidth(clipped));
 }
@@ -160,16 +167,19 @@ function combineInlinePetFooter(
   const totalRows = Math.max(petLines.length, textLines.length);
   const petStart = 0;
   const textStart = 0;
+  const imagePetLines = petLines.some(isTerminalImageLine);
+  const renderPetOnRight = placement === "inline-right" || imagePetLines;
   const lines: string[] = [];
 
   for (let row = 0; row < totalRows; row++) {
     const petLine = row >= petStart ? (petLines[row - petStart] ?? "") : "";
     const textLine = row >= textStart ? (textLines[row - textStart] ?? "") : "";
     const textPart = truncateToWidth(textLine, textWidth, "...");
-    if (placement === "inline-right") {
-      lines.push(`${padTextToWidth(textPart, textWidth)}${spaces(gap)}${petLine}`);
+    const petPart = petLineCell(petLine, petWidth);
+    if (renderPetOnRight) {
+      lines.push(`${padTextToWidth(textPart, textWidth)}${spaces(gap)}${petPart}`);
     } else {
-      lines.push(`${petLineCell(petLine, petWidth)}${spaces(gap)}${textPart}`);
+      lines.push(`${petPart}${spaces(gap)}${textPart}`);
     }
   }
 
@@ -191,6 +201,7 @@ function petRenderCacheKey(
   sizeCells: number,
 ): string {
   const cellDimensions = getCellDimensions();
+  const imageProtocol = getCapabilities().images ?? "none";
   return [
     pet.pet.slug,
     state,
@@ -198,6 +209,7 @@ function petRenderCacheKey(
     placement,
     width,
     sizeCells,
+    imageProtocol,
     cellDimensions.widthPx,
     cellDimensions.heightPx,
   ].join(":");
@@ -339,7 +351,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     const now = Date.now();
     if (petFlashState && petFlashUntil !== undefined && now < petFlashUntil) return petFlashState;
     if (petFlashState) clearPetFlash();
-    return ctx.isIdle() ? cfg.pets.state : petRuntimeState;
+    return petRuntimeState === "idle" ? cfg.pets.state : petRuntimeState;
   }
 
   function currentPetAnimation(ctx: ExtensionContext, cfg = config(ctx)) {
@@ -372,7 +384,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   }
 
   function schedulePetAnimation(ctx: ExtensionContext): void {
-    if (!pet || petTimer || petResizeFrozen()) return;
+    if (!pet || petTimer || petResizeFrozen() || !getCapabilities().images) return;
     const { state, elapsedMs } = currentPetAnimation(ctx);
     const frames = pet.states[state] ?? pet.states.idle;
     petTimer = setTimeout(
@@ -396,6 +408,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     return (
       cfg.pets.enabled &&
       cfg.pets.idleEmotes &&
+      getCapabilities().images !== null &&
       pet !== undefined &&
       petRuntimeState === "idle" &&
       activeToolCallIds.size === 0 &&
@@ -406,7 +419,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   }
 
   function playPetFlash(ctx: ExtensionContext, state: PetState, cfg = config(ctx)): void {
-    if (!cfg.pets.enabled) return;
+    if (!cfg.pets.enabled || !getCapabilities().images) return;
     clearPetFlash();
     const durationMs = petStateAnimationDurationMs(state);
     petFlashState = state;
@@ -442,6 +455,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     notify = false,
   ): Promise<void> {
     if (!cfg.pets.enabled) {
+      resetCodexPetKittyCache(pet, petImageId);
       pet = undefined;
       petError = undefined;
       petLoadKey = undefined;
@@ -455,6 +469,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     const key = [
       cfg.pets.slug || "__first__",
       cfg.pets.sizeCells,
+      getCapabilities().images ?? "none",
       cellDimensions.widthPx,
       cellDimensions.heightPx,
     ].join(":");
@@ -1172,6 +1187,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     },
     tuck: (ctx) => {
       writePetConfig(ctx, { enabled: false });
+      resetCodexPetKittyCache(pet, petImageId);
       pet = undefined;
       petError = undefined;
       resetPetRenderCache();
@@ -1217,7 +1233,10 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
           footerInstalled = false;
           requestFooterRender = undefined;
         },
-        invalidate() {},
+        invalidate() {
+          resetCodexPetKittyCache(pet, petImageId);
+          resetPetRenderCache();
+        },
         render(width: number): string[] {
           const now = Date.now();
           const footerSizeKey = `${width}:${process.stdout.rows ?? 0}`;
@@ -1366,7 +1385,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
                 petLines.push(...lastPetRender.lines);
               } else {
                 const { state: petState, elapsedMs } = currentPetAnimation(ctx, cfgForPets);
-                const { frame, frameIndex } = petFrameInfo(pet, petState, elapsedMs);
+                const { frameIndex } = petFrameInfo(pet, petState, elapsedMs);
                 const cacheKey = petRenderCacheKey(
                   pet,
                   petState,
@@ -1376,11 +1395,11 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
                   petRenderSizeCells,
                 );
                 const cachedPetLines = petRenderCache.get(cacheKey);
+                const imageProtocol = getCapabilities().images;
                 if (cachedPetLines) {
                   petLines.push(...cachedPetLines);
                   lastPetRender = { key: cacheKey, lines: cachedPetLines };
                 } else {
-                  const wasKittyFrameUploaded = frame?.kittyUploaded === true;
                   const renderedPetLines = renderCodexPetFrame(
                     pet,
                     petState,
@@ -1395,7 +1414,8 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
                   );
                   petLines.push(...renderedPetLines);
                   if (renderedPetLines.length > 0) {
-                    if (wasKittyFrameUploaded) rememberPetRender(cacheKey, renderedPetLines);
+                    if (imageProtocol !== null && imageProtocol !== "kitty")
+                      rememberPetRender(cacheKey, renderedPetLines);
                     else lastPetRender = { key: cacheKey, lines: renderedPetLines };
                   }
                 }

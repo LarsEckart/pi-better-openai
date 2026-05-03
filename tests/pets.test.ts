@@ -2,7 +2,8 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
+import { resetCapabilitiesCache, setCapabilities, visibleWidth } from "@mariozechner/pi-tui";
 import sharp from "sharp";
 import { _test } from "../index.ts";
 import {
@@ -14,7 +15,12 @@ import {
   nextAnimationFrameDelayMs,
   openAIPetsArgumentCompletions,
   PET_ANIMATION_ROWS,
+  renderCodexPetFrame,
 } from "../src/pets.ts";
+
+afterEach(() => {
+  resetCapabilitiesCache();
+});
 
 describe("Codex pets helpers", () => {
   test("resolves Codex home and pets directory", () => {
@@ -106,6 +112,49 @@ describe("Codex pets helpers", () => {
       expect(nextAnimationFrameDelayMs(loaded?.states.idle ?? [], 0)).toBe(280);
       expect(nextAnimationFrameDelayMs(loaded?.states.idle ?? [], 279)).toBe(1);
       expect(nextAnimationFrameDelayMs(loaded?.states.idle ?? [], 280)).toBe(110);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("avoids per-frame image encoding and animation output when terminal images are unsupported", async () => {
+    setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+    const tempDir = await mkdtemp(join(tmpdir(), "pi-better-openai-pet-no-images-"));
+    try {
+      const petDir = join(tempDir, "pets", "fallback");
+      mkdirSync(petDir, { recursive: true });
+      writeFileSync(join(petDir, "pet.json"), JSON.stringify({ name: "Fallback" }));
+      const sheet = await sharp({
+        create: {
+          width: 1536,
+          height: 1872,
+          channels: 4,
+          background: { r: 0, g: 255, b: 0, alpha: 1 },
+        },
+      })
+        .webp()
+        .toBuffer();
+      writeFileSync(join(petDir, "spritesheet.webp"), sheet);
+
+      const loaded = await loadCodexPet("fallback", tempDir);
+      const firstFrame = loaded?.states.idle[0];
+      expect(firstFrame?.data).toBeUndefined();
+      expect(firstFrame?.rawRgbaData).toBeUndefined();
+      expect(firstFrame).toMatchObject({ widthPx: 192, heightPx: 208 });
+
+      const rendered = renderCodexPetFrame(
+        loaded!,
+        "idle",
+        12,
+        { fg: (_color, value) => value },
+        {
+          sizeCells: 10,
+          imageId: 1,
+          now: 0,
+        },
+      );
+      expect(rendered[0]).toContain("[Image");
+      expect(visibleWidth(rendered[0] ?? "")).toBeLessThanOrEqual(12);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

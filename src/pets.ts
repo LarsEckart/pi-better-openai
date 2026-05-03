@@ -8,6 +8,8 @@ import {
   getCapabilities,
   getCellDimensions,
   Image,
+  imageFallback,
+  truncateToWidth,
   type AutocompleteItem,
   type ImageTheme,
 } from "@mariozechner/pi-tui";
@@ -200,7 +202,8 @@ export async function loadCodexPet(
   const cellWidth = DEFAULT_CELL_WIDTH;
   const cellHeight = DEFAULT_CELL_HEIGHT;
   const states = {} as Record<PetState, PetFrame[]>;
-  const useKitty = getCapabilities().images === "kitty";
+  const imageProtocol = getCapabilities().images;
+  const useKitty = imageProtocol === "kitty";
   const kittyImageBase = kittyImageBaseForPet(pet.slug);
   let kittyFrameOffset = 1;
   const cellDimensions = getCellDimensions();
@@ -220,6 +223,19 @@ export async function loadCodexPet(
   >) {
     states[state] = [];
     for (let column = 0; column < animation.durations.length; column++) {
+      const durationMs = animation.durations[column] ?? 150;
+      const frameWidthPx = targetWidthPx ?? cellWidth;
+      const frameHeightPx = targetHeightPx ?? cellHeight;
+      if (!imageProtocol) {
+        states[state].push({
+          mimeType: "image/png",
+          durationMs,
+          widthPx: frameWidthPx,
+          heightPx: frameHeightPx,
+        });
+        continue;
+      }
+
       let frame = source.clone().extract({
         left: column * cellWidth,
         top: animation.row * cellHeight,
@@ -239,9 +255,9 @@ export async function loadCodexPet(
         ...encoded,
         kittyImageId: useKitty ? kittyImageBase + kittyFrameOffset++ : undefined,
         mimeType: "image/png",
-        durationMs: animation.durations[column] ?? 150,
-        widthPx: targetWidthPx ?? cellWidth,
-        heightPx: targetHeightPx ?? cellHeight,
+        durationMs,
+        widthPx: frameWidthPx,
+        heightPx: frameHeightPx,
       });
     }
   }
@@ -370,7 +386,15 @@ export function renderCodexPetFrame(
     options.durationMultiplier,
   );
   if (!frame) return [];
-  if (getCapabilities().images === "kitty") return renderKittyPetFrame(frame, width, options);
+  const imageProtocol = getCapabilities().images;
+  if (imageProtocol === "kitty") return renderKittyPetFrame(frame, width, options);
+  if (!imageProtocol) {
+    const fallback = imageFallback(frame.mimeType, {
+      widthPx: frame.widthPx,
+      heightPx: frame.heightPx,
+    });
+    return [truncateToWidth(theme.fg("dim", fallback), width, theme.fg("dim", "..."))];
+  }
 
   if (!frame.data) return [];
   const imageTheme: ImageTheme = { fallbackColor: (value) => theme.fg("dim", value) };
