@@ -310,7 +310,7 @@ export function resetCodexPetKittyCache(pet?: LoadedCodexPet, placementImageId?:
   }
 }
 
-function deleteKittyPlacement(imageId: number): string {
+export function deleteCodexPetKittyPlacement(imageId: number): string {
   return `\x1b_Ga=d,d=i,i=${imageId},p=1,q=2\x1b\\`;
 }
 
@@ -360,12 +360,13 @@ function renderKittyPetFrame(
   const previousFrameImageId = previousKittyFrameByPlacement.get(options.imageId);
   const deletePrevious =
     previousFrameImageId !== undefined && previousFrameImageId !== frameImageId
-      ? deleteKittyPlacement(previousFrameImageId)
+      ? deleteCodexPetKittyPlacement(previousFrameImageId)
       : "";
+  const deleteCurrent = deleteCodexPetKittyPlacement(frameImageId);
   const upload = frame.kittyUploaded ? "" : encodeKittyRawRgba(frame, frameImageId);
   frame.kittyUploaded = true;
   previousKittyFrameByPlacement.set(options.imageId, frameImageId);
-  const sequence = `${deletePrevious}${upload}${placeKittyImage(frameImageId, columns, rows)}`;
+  const sequence = `${deletePrevious}${deleteCurrent}${upload}${placeKittyImage(frameImageId, columns, rows)}`;
   const lines: string[] = [];
   for (let i = 0; i < rows - 1; i++) lines.push("");
   const moveUp = rows > 1 ? `\x1b[${rows - 1}A` : "";

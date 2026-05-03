@@ -60,6 +60,7 @@ import {
   listCodexPets,
   nextAnimationFrameDelayMs,
   PET_ANIMATION_ROWS,
+  deleteCodexPetKittyPlacement,
   registerOpenAIPets,
   renderCodexPetFrame,
   resetCodexPetKittyCache,
@@ -252,8 +253,8 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   let stdoutResizeHandler: (() => void) | undefined;
   let petAnimationState: PetState | undefined;
   let petAnimationStartedAt = Date.now();
-  let lastPetRender: { key: string; lines: string[] } | undefined;
   const petRenderCache = new Map<string, string[]>();
+  const pendingPetKittyCleanupImageIds = new Set<number>();
   const activeToolCallIds = new Set<string>();
   const petImageId = 0x70657401;
 
@@ -294,8 +295,38 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   }
 
   function resetPetRenderCache(): void {
-    lastPetRender = undefined;
     petRenderCache.clear();
+  }
+
+  function queuePetKittyCleanup(target = pet): void {
+    if (!target) return;
+    for (const frames of Object.values(target.states)) {
+      for (const frame of frames) {
+        if (frame.kittyImageId !== undefined)
+          pendingPetKittyCleanupImageIds.add(frame.kittyImageId);
+      }
+    }
+  }
+
+  function takePetKittyCleanupSequence(): string {
+    if (pendingPetKittyCleanupImageIds.size === 0) return "";
+    const sequence = Array.from(pendingPetKittyCleanupImageIds)
+      .map((imageId) => deleteCodexPetKittyPlacement(imageId))
+      .join("");
+    pendingPetKittyCleanupImageIds.clear();
+    return sequence;
+  }
+
+  function withPendingPetKittyCleanup(lines: string[]): string[] {
+    const sequence = takePetKittyCleanupSequence();
+    if (!sequence) return lines;
+    if (lines.length === 0) return [sequence];
+    return [`${sequence}\x1b[0m${lines[0]}`, ...lines.slice(1)];
+  }
+
+  function flushPetKittyCleanupNow(): void {
+    const sequence = takePetKittyCleanupSequence();
+    if (sequence && process.stdout.isTTY) process.stdout.write(sequence);
   }
 
   function rememberPetRender(key: string, lines: string[]): void {
@@ -305,7 +336,6 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       if (firstKey === undefined) break;
       petRenderCache.delete(firstKey);
     }
-    lastPetRender = { key, lines };
   }
 
   function petResizeFrozen(now = Date.now()): boolean {
@@ -320,6 +350,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
 
   function freezePetForResize(ctx: ExtensionContext, now = Date.now()): void {
     petResizeFreezeUntil = now + PET_RESIZE_FREEZE_MS;
+    queuePetKittyCleanup();
     stopPetAnimation();
     stopPetIdleEmotes();
     stopPendingPetRenderRequest();
@@ -455,6 +486,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     notify = false,
   ): Promise<void> {
     if (!cfg.pets.enabled) {
+      queuePetKittyCleanup();
       resetCodexPetKittyCache(pet, petImageId);
       pet = undefined;
       petError = undefined;
@@ -1187,6 +1219,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     },
     tuck: (ctx) => {
       writePetConfig(ctx, { enabled: false });
+      queuePetKittyCleanup();
       resetCodexPetKittyCache(pet, petImageId);
       pet = undefined;
       petError = undefined;
@@ -1234,6 +1267,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
           requestFooterRender = undefined;
         },
         invalidate() {
+          queuePetKittyCleanup();
           resetCodexPetKittyCache(pet, petImageId);
           resetPetRenderCache();
         },
@@ -1380,44 +1414,32 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
 
           const petLines: string[] = [];
           if (cfgForPets.pets.enabled) {
-            if (pet) {
-              if (freezePetFrame && lastPetRender) {
-                petLines.push(...lastPetRender.lines);
+            if (pet && !freezePetFrame) {
+              const { state: petState, elapsedMs } = currentPetAnimation(ctx, cfgForPets);
+              const { frameIndex } = petFrameInfo(pet, petState, elapsedMs);
+              const cacheKey = petRenderCacheKey(
+                pet,
+                petState,
+                frameIndex,
+                requestedPetPlacement,
+                petColumnWidth,
+                petRenderSizeCells,
+              );
+              const cachedPetLines = petRenderCache.get(cacheKey);
+              const imageProtocol = getCapabilities().images;
+              if (cachedPetLines) {
+                petLines.push(...cachedPetLines);
               } else {
-                const { state: petState, elapsedMs } = currentPetAnimation(ctx, cfgForPets);
-                const { frameIndex } = petFrameInfo(pet, petState, elapsedMs);
-                const cacheKey = petRenderCacheKey(
-                  pet,
-                  petState,
-                  frameIndex,
-                  requestedPetPlacement,
-                  petColumnWidth,
-                  petRenderSizeCells,
-                );
-                const cachedPetLines = petRenderCache.get(cacheKey);
-                const imageProtocol = getCapabilities().images;
-                if (cachedPetLines) {
-                  petLines.push(...cachedPetLines);
-                  lastPetRender = { key: cacheKey, lines: cachedPetLines };
-                } else {
-                  const renderedPetLines = renderCodexPetFrame(
-                    pet,
-                    petState,
-                    petColumnWidth,
-                    theme,
-                    {
-                      sizeCells: petRenderSizeCells,
-                      imageId: petImageId,
-                      now: elapsedMs,
-                      durationMultiplier: 1,
-                    },
-                  );
-                  petLines.push(...renderedPetLines);
-                  if (renderedPetLines.length > 0) {
-                    if (imageProtocol !== null && imageProtocol !== "kitty")
-                      rememberPetRender(cacheKey, renderedPetLines);
-                    else lastPetRender = { key: cacheKey, lines: renderedPetLines };
-                  }
+                const renderedPetLines = renderCodexPetFrame(pet, petState, petColumnWidth, theme, {
+                  sizeCells: petRenderSizeCells,
+                  imageId: petImageId,
+                  now: elapsedMs,
+                  durationMultiplier: 1,
+                });
+                petLines.push(...renderedPetLines);
+                if (renderedPetLines.length > 0) {
+                  if (imageProtocol !== null && imageProtocol !== "kitty")
+                    rememberPetRender(cacheKey, renderedPetLines);
                 }
               }
             } else if (petError) {
@@ -1425,15 +1447,18 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
             }
           }
 
-          if (!cfgForPets.pets.enabled || petLines.length === 0) return textLines;
+          if (!cfgForPets.pets.enabled || petLines.length === 0)
+            return withPendingPetKittyCleanup(textLines);
 
           if (inlinePet) {
-            return combineInlinePetFooter(
-              petLines,
-              textLines,
-              width,
-              requestedPetPlacement,
-              petColumnWidth,
+            return withPendingPetKittyCleanup(
+              combineInlinePetFooter(
+                petLines,
+                textLines,
+                width,
+                requestedPetPlacement,
+                petColumnWidth,
+              ),
             );
           }
 
@@ -1443,10 +1468,10 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
               "dim",
               truncateToWidth(`─${label}${"─".repeat(width)}`, width, ""),
             );
-            return [divider, ...petLines, ...textLines];
+            return withPendingPetKittyCleanup([divider, ...petLines, ...textLines]);
           }
 
-          return [...petLines, ...textLines];
+          return withPendingPetKittyCleanup([...petLines, ...textLines]);
         },
       };
     });
@@ -1454,6 +1479,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
 
   function clearFooter(ctx: ExtensionContext): void {
     if (!footerInstalled) return;
+    flushPetKittyCleanupNow();
     ctx.ui.setFooter(undefined);
     footerInstalled = false;
     requestFooterRender = undefined;
@@ -1557,6 +1583,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
 
   pi.on("session_compact", (_event, ctx) => {
     refreshFooterTotals(ctx);
+    queuePetKittyCleanup();
     resetCodexPetKittyCache(pet, petImageId);
     resetPetRenderCache();
     updateFooter(ctx);
@@ -1564,6 +1591,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
 
   pi.on("session_tree", (_event, ctx) => {
     refreshFooterTotals(ctx);
+    queuePetKittyCleanup();
     resetCodexPetKittyCache(pet, petImageId);
     resetPetRenderCache();
     updateFooter(ctx);
@@ -1595,6 +1623,8 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     usageTimer = undefined;
     activeToolCallIds.clear();
     uninstallPetResizeGuard();
+    queuePetKittyCleanup();
+    flushPetKittyCleanupNow();
     resetPetRenderCache();
     clearPetFlash();
     stopPetIdleEmotes();
