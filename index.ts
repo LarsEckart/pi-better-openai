@@ -240,6 +240,9 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   let petError: string | undefined;
   let petLoadKey: string | undefined;
   let petLoadInFlight = false;
+  let petLoadingKey: string | undefined;
+  let petLoadNotify = false;
+  let queuedPetRefresh: { ctx: ExtensionContext; notify: boolean } | undefined;
   let petTimer: ReturnType<typeof setTimeout> | undefined;
   let petRenderRequestTimer: ReturnType<typeof setTimeout> | undefined;
   let petRuntimeState: PetState = "idle";
@@ -321,7 +324,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     const sequence = takePetKittyCleanupSequence();
     if (!sequence) return lines;
     if (lines.length === 0) return [sequence];
-    return [`${sequence}\x1b[0m${lines[0]}`, ...lines.slice(1)];
+    return [`${sequence}\x1b[0m${lines[0]}\x1b[0m`, ...lines.slice(1)];
   }
 
   function flushPetKittyCleanupNow(): void {
@@ -480,12 +483,25 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     petIdleEmoteTimer.unref?.();
   }
 
+  function petLoadKeyForConfig(cfg: ResolvedConfig): string {
+    const cellDimensions = getCellDimensions();
+    return [
+      cfg.pets.slug || "__first__",
+      cfg.pets.sizeCells,
+      getCapabilities().images ?? "none",
+      cellDimensions.widthPx,
+      cellDimensions.heightPx,
+    ].join(":");
+  }
+
   async function refreshPet(
     ctx: ExtensionContext,
     cfg = config(ctx),
     notify = false,
   ): Promise<void> {
+    if (shuttingDown) return;
     if (!cfg.pets.enabled) {
+      queuedPetRefresh = undefined;
       queuePetKittyCleanup();
       resetCodexPetKittyCache(pet, petImageId);
       pet = undefined;
@@ -497,26 +513,42 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       stopPetAnimation();
       return;
     }
-    const cellDimensions = getCellDimensions();
-    const key = [
-      cfg.pets.slug || "__first__",
-      cfg.pets.sizeCells,
-      getCapabilities().images ?? "none",
-      cellDimensions.widthPx,
-      cellDimensions.heightPx,
-    ].join(":");
-    if (petLoadInFlight || petLoadKey === key) return;
+
+    const key = petLoadKeyForConfig(cfg);
+    if (petLoadKey === key) return;
+    if (petLoadInFlight) {
+      if (petLoadingKey === key) petLoadNotify ||= notify;
+      else queuedPetRefresh = { ctx, notify: queuedPetRefresh?.notify || notify };
+      return;
+    }
+
     petLoadInFlight = true;
+    petLoadingKey = key;
+    petLoadNotify = notify;
     petError = undefined;
+    const previousPet = pet;
+
+    function shouldApplyLoadResult(): boolean {
+      if (shuttingDown || queuedPetRefresh) return false;
+      const latestConfig = config(ctx);
+      return latestConfig.pets.enabled && petLoadKeyForConfig(latestConfig) === key;
+    }
+
     try {
-      pet = await loadCodexPet(cfg.pets.slug || undefined, undefined, {
+      const loadedPet = await loadCodexPet(cfg.pets.slug || undefined, undefined, {
         sizeCells: cfg.pets.sizeCells,
       });
+      if (!shouldApplyLoadResult()) return;
+      if (previousPet) {
+        queuePetKittyCleanup(previousPet);
+        resetCodexPetKittyCache(previousPet, petImageId);
+      }
+      pet = loadedPet;
       petAnimationState = undefined;
       resetPetRenderCache();
-      petLoadKey = pet ? key : undefined;
+      petLoadKey = key;
       if (!pet) petError = "No ready custom Codex pet found.";
-      if (notify) {
+      if (petLoadNotify) {
         ctx.ui.notify(
           pet
             ? `Rendering ${pet.pet.name} in the Better OpenAI footer.`
@@ -525,13 +557,23 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
         );
       }
     } catch (error) {
+      if (!shouldApplyLoadResult()) return;
+      if (previousPet) {
+        queuePetKittyCleanup(previousPet);
+        resetCodexPetKittyCache(previousPet, petImageId);
+      }
       pet = undefined;
-      petLoadKey = undefined;
+      petLoadKey = key;
       petError = error instanceof Error ? error.message : String(error);
-      if (notify) ctx.ui.notify(`Could not render Codex pet: ${petError}`, "warning");
+      if (petLoadNotify) ctx.ui.notify(`Could not render Codex pet: ${petError}`, "warning");
     } finally {
       petLoadInFlight = false;
-      updateFooter(ctx);
+      petLoadingKey = undefined;
+      petLoadNotify = false;
+      const queued = queuedPetRefresh;
+      queuedPetRefresh = undefined;
+      if (queued && !shuttingDown) void refreshPet(queued.ctx, config(queued.ctx), queued.notify);
+      if (!shuttingDown) updateFooter(ctx);
     }
   }
 
@@ -1617,6 +1659,9 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   pi.on("session_shutdown", () => {
     shuttingDown = true;
     queuedUsageRefresh = undefined;
+    queuedPetRefresh = undefined;
+    petLoadingKey = undefined;
+    petLoadNotify = false;
     usageAbortController?.abort();
     usageAbortController = undefined;
     if (usageTimer) clearInterval(usageTimer);

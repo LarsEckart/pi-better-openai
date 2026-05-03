@@ -7,8 +7,11 @@ import { resetCapabilitiesCache, setCapabilities, visibleWidth } from "@mariozec
 import sharp from "sharp";
 import { _test } from "../index.ts";
 import {
+  type LoadedCodexPet,
+  type PetFrame,
   animationFrameAt,
   codexHome,
+  deleteCodexPetKittyPlacement,
   formatCodexPetsHelp,
   listCodexPets,
   loadCodexPet,
@@ -158,6 +161,48 @@ describe("Codex pets helpers", () => {
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+
+  test("deletes stale Kitty placements before placing a pet frame", () => {
+    setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+    const frame: PetFrame = {
+      rawRgbaData: Buffer.from([0, 0, 0, 255]).toString("base64"),
+      kittyImageId: 42,
+      mimeType: "image/png",
+      durationMs: 100,
+      widthPx: 1,
+      heightPx: 1,
+    };
+    const loaded = {
+      pet: {
+        slug: "kitty-cleanup",
+        name: "Kitty Cleanup",
+        dir: "/tmp",
+        spritesheetPath: "spritesheet.webp",
+        hasSpritesheet: true,
+      },
+      states: { idle: [frame] } as LoadedCodexPet["states"],
+    } satisfies LoadedCodexPet;
+
+    const firstRender = renderCodexPetFrame(
+      loaded,
+      "idle",
+      8,
+      { fg: (_color, value) => value },
+      { sizeCells: 4, imageId: 7, now: 0 },
+    ).join("");
+    expect(firstRender).toContain(deleteCodexPetKittyPlacement(42));
+    expect(firstRender).toContain("a=t");
+
+    const secondRender = renderCodexPetFrame(
+      loaded,
+      "idle",
+      8,
+      { fg: (_color, value) => value },
+      { sizeCells: 4, imageId: 7, now: 0 },
+    ).join("");
+    expect(secondRender).toContain(deleteCodexPetKittyPlacement(42));
+    expect(secondRender).not.toContain("a=t");
   });
 
   test("completes pet names for wake and select subcommands", async () => {
