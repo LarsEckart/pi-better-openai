@@ -107,6 +107,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   let shuttingDown = false;
   let usageAbortController: AbortController | undefined;
   let footerInstalled = false;
+  let statusInstalled = false;
   let requestFooterRender: (() => void) | undefined;
   let lastInjectedAt: number | undefined;
   let lastInjectedModel: string | undefined;
@@ -336,7 +337,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
         currentValue: cfg.footer.mode,
         values: [...FOOTER_MODES],
         description:
-          "replace = custom footer, status = pi footer plus status line, off = no Better OpenAI footer/status.",
+          "replace = custom footer, status = pi footer plus status line, off = no Better OpenAI footer/status and leaves other footers untouched.",
       },
       {
         id: "usage.enabled",
@@ -676,20 +677,34 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     });
   }
 
+  function clearFooter(ctx: ExtensionContext): void {
+    if (!footerInstalled) return;
+    ctx.ui.setFooter(undefined);
+    footerInstalled = false;
+    requestFooterRender = undefined;
+  }
+
+  function setStatus(ctx: ExtensionContext, text: string | undefined): void {
+    if (!text && !statusInstalled) return;
+    ctx.ui.setStatus(STATUS_KEY, text);
+    statusInstalled = text !== undefined;
+  }
+
   function updateFooter(ctx: ExtensionContext): void {
     const cfg = config(ctx);
     if (cfg.footer.mode === "replace") {
-      ctx.ui.setStatus(STATUS_KEY, undefined);
+      setStatus(ctx, undefined);
       installFooter(ctx);
       return;
     }
-    footerInstalled = false;
-    requestFooterRender = undefined;
-    ctx.ui.setFooter(undefined);
+
+    clearFooter(ctx);
+
     if (cfg.footer.mode === "off") {
-      ctx.ui.setStatus(STATUS_KEY, undefined);
+      setStatus(ctx, undefined);
       return;
     }
+
     const fast =
       active && supportsFast(ctx, cfg.supportedModels)
         ? `${ctx.model?.id ?? "model"} fast`
@@ -698,7 +713,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       usageSnapshot && cfg.usage.enabled && isOpenAISubscriptionModel(ctx, cfg)
         ? formatUsageSnapshot(usageSnapshot, cfg.usage)
         : undefined;
-    ctx.ui.setStatus(STATUS_KEY, [fast, usage].filter(Boolean).join(" | ") || undefined);
+    setStatus(ctx, [fast, usage].filter(Boolean).join(" | ") || undefined);
   }
 
   pi.on("session_start", (_event, ctx) => {
