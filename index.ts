@@ -10,6 +10,7 @@ import {
   type ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
 import {
+  calculateImageRows,
   Container,
   getCapabilities,
   getCellDimensions,
@@ -71,7 +72,7 @@ const COMMAND = "fast";
 const OPENAI_STATUS_COMMAND = "openai-usage";
 const OPENAI_SETTINGS_COMMAND = "openai-settings";
 const FLAG = "fast";
-const PET_RESIZE_FREEZE_MS = 500;
+const PET_RESIZE_FREEZE_MS = 120;
 const PET_RENDER_CACHE_LIMIT = 48;
 const SERVICE_TIER = "priority";
 type SettingsPickerItem = {
@@ -191,6 +192,33 @@ function petFrameInfo(pet: LoadedCodexPet, state: PetState, elapsedMs: number) {
   const frames = pet.states[state] ?? pet.states.idle;
   const frame = animationFrameAt(frames, elapsedMs);
   return { frame, frameIndex: frame ? frames.indexOf(frame) : -1 };
+}
+
+function petFrameRows(
+  pet: LoadedCodexPet,
+  state: PetState,
+  elapsedMs: number,
+  width: number,
+  sizeCells: number,
+): number {
+  const { frame } = petFrameInfo(pet, state, elapsedMs);
+  if (!frame || !getCapabilities().images) return 0;
+  const columns = Math.max(1, Math.min(Math.max(1, width - 2), sizeCells));
+  return calculateImageRows(
+    { widthPx: frame.widthPx, heightPx: frame.heightPx },
+    columns,
+    getCellDimensions(),
+  );
+}
+
+function petPlaceholderLines(
+  pet: LoadedCodexPet,
+  state: PetState,
+  elapsedMs: number,
+  width: number,
+  sizeCells: number,
+): string[] {
+  return Array.from({ length: petFrameRows(pet, state, elapsedMs, width, sizeCells) }, () => "");
 }
 
 function petRenderCacheKey(
@@ -1456,32 +1484,50 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
 
           const petLines: string[] = [];
           if (cfgForPets.pets.enabled) {
-            if (pet && !freezePetFrame) {
+            if (pet) {
               const { state: petState, elapsedMs } = currentPetAnimation(ctx, cfgForPets);
-              const { frameIndex } = petFrameInfo(pet, petState, elapsedMs);
-              const cacheKey = petRenderCacheKey(
-                pet,
-                petState,
-                frameIndex,
-                requestedPetPlacement,
-                petColumnWidth,
-                petRenderSizeCells,
-              );
-              const cachedPetLines = petRenderCache.get(cacheKey);
-              const imageProtocol = getCapabilities().images;
-              if (cachedPetLines) {
-                petLines.push(...cachedPetLines);
+              if (freezePetFrame) {
+                petLines.push(
+                  ...petPlaceholderLines(
+                    pet,
+                    petState,
+                    elapsedMs,
+                    petColumnWidth,
+                    petRenderSizeCells,
+                  ),
+                );
               } else {
-                const renderedPetLines = renderCodexPetFrame(pet, petState, petColumnWidth, theme, {
-                  sizeCells: petRenderSizeCells,
-                  imageId: petImageId,
-                  now: elapsedMs,
-                  durationMultiplier: 1,
-                });
-                petLines.push(...renderedPetLines);
-                if (renderedPetLines.length > 0) {
-                  if (imageProtocol !== null && imageProtocol !== "kitty")
-                    rememberPetRender(cacheKey, renderedPetLines);
+                const { frameIndex } = petFrameInfo(pet, petState, elapsedMs);
+                const cacheKey = petRenderCacheKey(
+                  pet,
+                  petState,
+                  frameIndex,
+                  requestedPetPlacement,
+                  petColumnWidth,
+                  petRenderSizeCells,
+                );
+                const cachedPetLines = petRenderCache.get(cacheKey);
+                const imageProtocol = getCapabilities().images;
+                if (cachedPetLines) {
+                  petLines.push(...cachedPetLines);
+                } else {
+                  const renderedPetLines = renderCodexPetFrame(
+                    pet,
+                    petState,
+                    petColumnWidth,
+                    theme,
+                    {
+                      sizeCells: petRenderSizeCells,
+                      imageId: petImageId,
+                      now: elapsedMs,
+                      durationMultiplier: 1,
+                    },
+                  );
+                  petLines.push(...renderedPetLines);
+                  if (renderedPetLines.length > 0) {
+                    if (imageProtocol !== null && imageProtocol !== "kitty")
+                      rememberPetRender(cacheKey, renderedPetLines);
+                  }
                 }
               }
             } else if (petError) {
