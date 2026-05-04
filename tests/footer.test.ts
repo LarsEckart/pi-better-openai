@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import betterOpenAI from "../index.ts";
+import betterOpenAI, { _test } from "../index.ts";
 
 type EventHandler = (event: unknown, ctx: ExtensionContext) => void | Promise<void>;
 
@@ -102,6 +102,25 @@ afterEach(() => {
   for (const tempDir of tempDirs.splice(0)) {
     rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+describe("footer pet layout", () => {
+  test("keeps terminal-image pets on the left for inline-left placement", () => {
+    const imageLine = "\x1b[1A\x1b_Ga=p,i=1\x1b\\";
+
+    const lines = _test.combineInlinePetFooter(
+      ["", imageLine],
+      ["path", "stats"],
+      20,
+      "inline-left",
+      4,
+    );
+
+    expect(lines[0]).toBe("      path");
+    expect(lines[1]).toMatch(/^ {6}stats/);
+    expect(lines[1]).toContain("\x1b[0m\r\x1b[1A\x1b_Ga=p,i=1\x1b\\");
+    expect(lines[1]).not.toContain("\x1b[1A\x1b[1A");
+  });
 });
 
 describe("footer mode ownership", () => {

@@ -157,6 +157,18 @@ function petLineCell(line: string, width: number): string {
   return clipped + spaces(width - visibleWidth(clipped));
 }
 
+function stripLeadingCursorUp(line: string): string {
+  if (!line.startsWith("\x1b[")) return line;
+  const end = line.indexOf("A", 2);
+  if (end === -1) return line;
+  return /^\d+$/.test(line.slice(2, end)) ? line.slice(end + 1) : line;
+}
+
+function terminalImageInlineLeftSequence(line: string, totalRows: number): string {
+  const moveUp = totalRows > 1 ? `\x1b[${totalRows - 1}A` : "";
+  return `\x1b[0m\r${moveUp}${stripLeadingCursorUp(line)}`;
+}
+
 function combineInlinePetFooter(
   petLines: string[],
   textLines: string[],
@@ -169,20 +181,27 @@ function combineInlinePetFooter(
   const totalRows = Math.max(petLines.length, textLines.length);
   const petStart = 0;
   const textStart = 0;
-  const imagePetLines = petLines.some(isTerminalImageLine);
-  const renderPetOnRight = placement === "inline-right" || imagePetLines;
+  const hasTerminalImageLine = petLines.some(isTerminalImageLine);
+  const leftImageLine =
+    placement === "inline-left" ? petLines.find(isTerminalImageLine) : undefined;
+  const renderPetOnRight =
+    placement === "inline-right" || (placement !== "inline-left" && hasTerminalImageLine);
   const lines: string[] = [];
 
   for (let row = 0; row < totalRows; row++) {
     const petLine = row >= petStart ? (petLines[row - petStart] ?? "") : "";
     const textLine = row >= textStart ? (textLines[row - textStart] ?? "") : "";
     const textPart = truncateToWidth(textLine, textWidth, "...");
-    const petPart = petLineCell(petLine, petWidth);
+    const petPart = leftImageLine ? spaces(petWidth) : petLineCell(petLine, petWidth);
     if (renderPetOnRight) {
       lines.push(`${padTextToWidth(textPart, textWidth)}${spaces(gap)}${petPart}`);
     } else {
       lines.push(`${petPart}${spaces(gap)}${textPart}`);
     }
+  }
+
+  if (leftImageLine && lines.length > 0) {
+    lines[lines.length - 1] += terminalImageInlineLeftSequence(leftImageLine, totalRows);
   }
 
   return lines;
@@ -1748,6 +1767,7 @@ export const _test = {
   resolveConfig,
   readRawConfig,
   supportsFast,
+  combineInlinePetFooter,
   parseUsageSnapshot,
   formatPercent,
   formatUsageSnapshot,
