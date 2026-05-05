@@ -106,7 +106,7 @@ afterEach(() => {
 
 describe("footer pet layout", () => {
   test("keeps terminal-image pets on the left for inline-left placement", () => {
-    const imageLine = "\x1b[1A\x1b_Ga=p,i=1\x1b\\";
+    const imageLine = "\x1b[1A\x1b_Ga=p,i=1\x1b\\\x1b[1B";
 
     const lines = _test.combineInlinePetFooter(
       ["", imageLine],
@@ -118,8 +118,9 @@ describe("footer pet layout", () => {
 
     expect(lines[0]).toBe("      path");
     expect(lines[1]).toMatch(/^ {6}stats/);
-    expect(lines[1]).toContain("\x1b[0m\r\x1b[1A\x1b_Ga=p,i=1\x1b\\");
+    expect(lines[1]).toContain("\x1b[0m\r\x1b[1A\x1b_Ga=p,i=1\x1b\\\x1b[1B");
     expect(lines[1]).not.toContain("\x1b[1A\x1b[1A");
+    expect(lines[1]).not.toContain("\x1b[1B\x1b[1B");
   });
 });
 

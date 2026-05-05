@@ -193,6 +193,9 @@ describe("Codex pets helpers", () => {
     ).join("");
     expect(firstRender).toContain(deleteCodexPetKittyPlacement(42));
     expect(firstRender).toContain("a=t");
+    expect(firstRender).toContain("C=1");
+    expect(firstRender).toContain("\x1b[1A");
+    expect(firstRender).toContain("\x1b[1B");
 
     const secondRender = renderCodexPetFrame(
       loaded,
@@ -240,6 +243,35 @@ describe("Codex pets helpers", () => {
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+
+  test("builds pet settings picker values for ready pets", () => {
+    const pets = [
+      {
+        slug: "stacky-plus",
+        name: "Stacky Plus",
+        dir: "/tmp/stacky-plus",
+        spritesheetPath: "spritesheet.webp",
+        hasSpritesheet: true,
+      },
+      {
+        slug: "broken",
+        name: "Broken",
+        dir: "/tmp/broken",
+        spritesheetPath: "spritesheet.webp",
+        hasSpritesheet: false,
+      },
+    ];
+    const cfg = { pets: { slug: "" } } as Parameters<typeof _test.petConfigPickerValue>[0];
+
+    expect(_test.readyPetPickerValues(pets)).toEqual([_test.PET_AUTO_VALUE, "stacky-plus"]);
+    expect(_test.petConfigPickerValue(cfg)).toBe(_test.PET_AUTO_VALUE);
+    expect(_test.petSlugFromPickerValue(_test.PET_AUTO_VALUE)).toBe("");
+    expect(_test.petPickerDescription(cfg, pets)).toContain("Auto: Stacky Plus (stacky-plus)");
+
+    cfg.pets.slug = "stacky-plus";
+    expect(_test.petConfigPickerValue(cfg)).toBe("stacky-plus");
+    expect(_test.petPickerDescription(cfg, pets)).toContain("Selected: Stacky Plus (stacky-plus)");
   });
 
   test("formats setup help", () => {

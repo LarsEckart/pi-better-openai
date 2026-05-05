@@ -315,7 +315,7 @@ export function deleteCodexPetKittyPlacement(imageId: number): string {
 }
 
 function placeKittyImage(imageId: number, columns: number, rows: number): string {
-  return `\x1b_Ga=p,i=${imageId},p=1,c=${columns},r=${rows},q=2\x1b\\`;
+  return `\x1b_Ga=p,i=${imageId},p=1,c=${columns},r=${rows},q=2,C=1\x1b\\`;
 }
 
 function encodeKittyRawRgba(frame: PetFrame, imageId: number): string {
@@ -370,7 +370,8 @@ function renderKittyPetFrame(
   const lines: string[] = [];
   for (let i = 0; i < rows - 1; i++) lines.push("");
   const moveUp = rows > 1 ? `\x1b[${rows - 1}A` : "";
-  lines.push(moveUp + sequence);
+  const moveDown = rows > 1 ? `\x1b[${rows - 1}B` : "";
+  lines.push(moveUp + sequence + moveDown);
   return lines;
 }
 

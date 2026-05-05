@@ -55,6 +55,7 @@ import {
 } from "./src/usage.ts";
 import { registerOpenAIImage, _imageTest } from "./src/image.ts";
 import {
+  type CodexPetPackage,
   type LoadedCodexPet,
   loadCodexPet,
   animationFrameAt,
@@ -74,6 +75,7 @@ const OPENAI_SETTINGS_COMMAND = "openai-settings";
 const FLAG = "fast";
 const PET_RESIZE_FREEZE_MS = 120;
 const PET_RENDER_CACHE_LIMIT = 48;
+const PET_AUTO_VALUE = "first ready pet";
 const SERVICE_TIER = "priority";
 type SettingsPickerItem = {
   id: string;
@@ -138,6 +140,46 @@ function petSizeCellsForPlacement(placement: PetPlacement, sizeCells: number): n
   return placement === "badge" ? Math.min(6, sizeCells) : sizeCells;
 }
 
+function readyPetPickerValues(pets: CodexPetPackage[]): string[] | undefined {
+  const readyPets = pets.filter((pet) => pet.hasSpritesheet);
+  return readyPets.length > 0 ? [PET_AUTO_VALUE, ...readyPets.map((pet) => pet.slug)] : undefined;
+}
+
+function petConfigPickerValue(cfg: ResolvedConfig): string {
+  return cfg.pets.slug || PET_AUTO_VALUE;
+}
+
+function petSlugFromPickerValue(value: string): string {
+  return value === PET_AUTO_VALUE ? "" : value;
+}
+
+function petPickerLookupKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function findPickerPet(value: string, pets: CodexPetPackage[]): CodexPetPackage | undefined {
+  const requested = petPickerLookupKey(value.trim());
+  if (!requested) return undefined;
+  return pets.find(
+    (pet) =>
+      pet.hasSpritesheet &&
+      (petPickerLookupKey(pet.slug) === requested ||
+        petPickerLookupKey(pet.name) === requested ||
+        (pet.id !== undefined && petPickerLookupKey(pet.id) === requested)),
+  );
+}
+
+function petPickerDescription(cfg: ResolvedConfig, pets: CodexPetPackage[]): string {
+  const readyPets = pets.filter((pet) => pet.hasSpritesheet);
+  if (readyPets.length === 0)
+    return "No ready custom pets found. Run /pets list for setup details.";
+  const selectedPet = cfg.pets.slug ? findPickerPet(cfg.pets.slug, readyPets) : readyPets[0];
+  const selected = selectedPet
+    ? `${cfg.pets.slug ? "Selected" : "Auto"}: ${selectedPet.name} (${selectedPet.slug})`
+    : `Selected: ${cfg.pets.slug}`;
+  return `${selected}. Enter/Space/→ cycles pets; ← cycles back. Preview appears in the footer while this menu is open.`;
+}
+
 function spaces(width: number): string {
   return " ".repeat(Math.max(0, width));
 }
@@ -164,9 +206,18 @@ function stripLeadingCursorUp(line: string): string {
   return /^\d+$/.test(line.slice(2, end)) ? line.slice(end + 1) : line;
 }
 
+function stripTrailingCursorDown(line: string): string {
+  if (!line.endsWith("B")) return line;
+  const start = line.lastIndexOf("\x1b[");
+  if (start === -1) return line;
+  return /^\d+$/.test(line.slice(start + 2, -1)) ? line.slice(0, start) : line;
+}
+
 function terminalImageInlineLeftSequence(line: string, totalRows: number): string {
   const moveUp = totalRows > 1 ? `\x1b[${totalRows - 1}A` : "";
-  return `\x1b[0m\r${moveUp}${stripLeadingCursorUp(line)}`;
+  const moveDown = totalRows > 1 ? `\x1b[${totalRows - 1}B` : "";
+  const balancedLine = stripTrailingCursorDown(stripLeadingCursorUp(line));
+  return `\x1b[0m\r${moveUp}${balancedLine}${moveDown}`;
 }
 
 function combineInlinePetFooter(
@@ -280,6 +331,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   let footerInstalled = false;
   let statusInstalled = false;
   let requestFooterRender: (() => void) | undefined;
+  let requestSettingsRender: (() => void) | undefined;
   let lastInjectedAt: number | undefined;
   let lastInjectedModel: string | undefined;
   let lastInjectedTier: string | undefined;
@@ -294,6 +346,8 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   let petRenderRequestTimer: ReturnType<typeof setTimeout> | undefined;
   let petRuntimeState: PetState = "idle";
   let petPreviewState: PetState | undefined;
+  let petSettingsPreviewActive = false;
+  let petSettingsPets: CodexPetPackage[] = [];
   let petFlashState: PetState | undefined;
   let petFlashUntil: number | undefined;
   let petFlashTimer: ReturnType<typeof setTimeout> | undefined;
@@ -325,6 +379,25 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       active,
       desiredActive,
     });
+  }
+
+  function shouldLoadPetForConfig(cfg: ResolvedConfig): boolean {
+    return cfg.pets.enabled || petSettingsPreviewActive;
+  }
+
+  function shouldRenderPetInFooter(cfg: ResolvedConfig): boolean {
+    return cfg.pets.enabled || (petSettingsPreviewActive && footerInstalled);
+  }
+
+  function setPetSettingsPreviewActive(ctx: ExtensionContext, next: boolean): void {
+    if (petSettingsPreviewActive === next) return;
+    petSettingsPreviewActive = next;
+    if (!config(ctx).pets.enabled) petLoadKey = undefined;
+    void refreshPet(ctx, config(ctx)).then(() => {
+      if (!shouldRenderPetInFooter(config(ctx))) flushPetKittyCleanupNow();
+      requestSettingsRender?.();
+    });
+    updateFooter(ctx);
   }
 
   function petStateAnimationDurationMs(state: PetState): number {
@@ -460,6 +533,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     petRenderRequestTimer = setTimeout(() => {
       petRenderRequestTimer = undefined;
       requestFooterRender?.();
+      requestSettingsRender?.();
     }, 16);
     petRenderRequestTimer.unref?.();
   }
@@ -494,6 +568,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       petRuntimeState === "idle" &&
       activeToolCallIds.size === 0 &&
       petPreviewState === undefined &&
+      !petSettingsPreviewActive &&
       petFlashState === undefined &&
       !petResizeFrozen()
     );
@@ -547,7 +622,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     notify = false,
   ): Promise<void> {
     if (shuttingDown) return;
-    if (!cfg.pets.enabled) {
+    if (!shouldLoadPetForConfig(cfg)) {
       queuedPetRefresh = undefined;
       queuePetKittyCleanup();
       resetCodexPetKittyCache(pet, petImageId);
@@ -578,7 +653,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     function shouldApplyLoadResult(): boolean {
       if (shuttingDown || queuedPetRefresh) return false;
       const latestConfig = config(ctx);
-      return latestConfig.pets.enabled && petLoadKeyForConfig(latestConfig) === key;
+      return shouldLoadPetForConfig(latestConfig) && petLoadKeyForConfig(latestConfig) === key;
     }
 
     try {
@@ -834,6 +909,13 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
           "Render a custom Codex pet from ${CODEX_HOME:-~/.codex}/pets in the Better OpenAI footer.",
       },
       {
+        id: "pets.slug",
+        label: "Pet",
+        currentValue: petConfigPickerValue(cfg),
+        values: readyPetPickerValues(petSettingsPets),
+        description: petPickerDescription(cfg, petSettingsPets),
+      },
+      {
         id: "pets.placement",
         label: "Placement",
         currentValue: cfg.pets.placement,
@@ -905,6 +987,25 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     return (PET_STATES as readonly string[]).includes(value) ? (value as PetState) : undefined;
   }
 
+  function renderPetSettingsPreview(ctx: ExtensionContext, width: number): string[] {
+    if (!petSettingsPreviewActive || shouldRenderPetInFooter(config(ctx))) return [];
+    if (!pet) {
+      return [petError ? `Preview unavailable: ${petError}` : "Preview: loading pet…"];
+    }
+    const cfg = config(ctx);
+    const { state, elapsedMs } = currentPetAnimation(ctx, cfg);
+    const plainTheme = { fg: (_color: string, value: string) => value };
+    return [
+      `Preview: ${pet.pet.name}`,
+      ...renderCodexPetFrame(pet, state, width, plainTheme, {
+        sizeCells: cfg.pets.sizeCells,
+        imageId: petImageId,
+        now: elapsedMs,
+        durationMultiplier: 1,
+      }),
+    ];
+  }
+
   function settingsSubmenu(
     title: string,
     items: () => SettingsPickerItem[],
@@ -913,6 +1014,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     options?: {
       onSelection?: (item: SettingsPickerItem | undefined) => void;
       onClose?: () => void;
+      renderExtra?: (width: number) => string[];
     },
   ) {
     const theme = getSettingsListTheme();
@@ -940,11 +1042,14 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       done();
     }
 
-    function cycleSelected(): void {
+    function cycleSelected(direction: 1 | -1 = 1): void {
       const item = selectedItem();
       if (!item?.values?.length) return;
       const currentIndex = item.values.indexOf(item.currentValue);
-      const newValue = item.values[(currentIndex + 1) % item.values.length] ?? item.currentValue;
+      const startIndex = currentIndex === -1 ? (direction === 1 ? -1 : 0) : currentIndex;
+      const newValue =
+        item.values[(startIndex + direction + item.values.length) % item.values.length] ??
+        item.currentValue;
       writeSetting(ctx, item.id, newValue);
       options?.onSelection?.(selectedItem());
     }
@@ -995,9 +1100,16 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
             theme.description(`  ${truncateToWidth(selected.description, width - 4)}`),
           );
         }
+        const extraLines = options?.renderExtra?.(width) ?? [];
+        if (extraLines.length > 0) {
+          lines.push("");
+          for (const line of extraLines) {
+            lines.push(isTerminalImageLine(line) ? line : truncateToWidth(line, width, "..."));
+          }
+        }
         lines.push(
           "",
-          theme.hint("  Type to search · ↑↓ navigate · Enter/Space to change · Esc to go back"),
+          theme.hint("  Type to search · ↑↓ navigate · ←→/Enter/Space to change · Esc to go back"),
         );
         return lines;
       },
@@ -1014,8 +1126,14 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
           selectedIndex = selectedIndex === 0 ? current.length - 1 : selectedIndex - 1;
         else if (matchesKey(data, Key.down))
           selectedIndex = selectedIndex === current.length - 1 ? 0 : selectedIndex + 1;
-        else if (matchesKey(data, Key.enter) || matchesKey(data, Key.space) || data === " ")
-          cycleSelected();
+        else if (
+          matchesKey(data, Key.right) ||
+          matchesKey(data, Key.enter) ||
+          matchesKey(data, Key.space) ||
+          data === " "
+        )
+          cycleSelected(1);
+        else if (matchesKey(data, Key.left)) cycleSelected(-1);
         else if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) close();
         else if (matchesKey(data, Key.backspace)) {
           searchQuery = searchQuery.slice(0, -1);
@@ -1058,8 +1176,9 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
         label: "Footer pet",
         currentValue: "configure",
         description: "Configure footer pet visibility, animation-state mapping, and size.",
-        submenu: (_value, done) =>
-          settingsSubmenu(
+        submenu: (_value, done) => {
+          setPetSettingsPreviewActive(ctx, true);
+          return settingsSubmenu(
             "Footer pet settings",
             () => buildPetSettingsItems(config(ctx)),
             ctx,
@@ -1074,10 +1193,13 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
               },
               onClose: () => {
                 petPreviewState = undefined;
+                setPetSettingsPreviewActive(ctx, false);
                 updateFooter(ctx);
               },
+              renderExtra: (width) => renderPetSettingsPreview(ctx, width),
             },
-          ),
+          );
+        },
       },
       {
         id: "usage.enabled",
@@ -1200,14 +1322,16 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       pets[key] =
         key === "sizeCells" || key === "idleEmoteIntervalMs"
           ? num
-          : rawValue === "true"
-            ? true
-            : rawValue === "false"
-              ? false
-              : rawValue;
+          : key === "slug"
+            ? petSlugFromPickerValue(rawValue)
+            : rawValue === "true"
+              ? true
+              : rawValue === "false"
+                ? false
+                : rawValue;
       current.pets = pets;
-      if (key === "enabled" || key === "sizeCells") petLoadKey = undefined;
-      if (key === "placement" || key === "sizeCells") resetPetRenderCache();
+      if (key === "enabled" || key === "sizeCells" || key === "slug") petLoadKey = undefined;
+      if (key === "placement" || key === "sizeCells" || key === "slug") resetPetRenderCache();
       if (key === "idleEmotes" || key === "idleEmoteIntervalMs") stopPetIdleEmotes();
     } else if (id.startsWith("image.")) {
       const image = isRecord(current.image) ? current.image : {};
@@ -1224,7 +1348,8 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     }
     writeConfig(cfg.configPath, current);
     const next = refresh(ctx);
-    if (id === "pets.enabled" || id === "pets.sizeCells") void refreshPet(ctx, next);
+    if (id === "pets.enabled" || id === "pets.sizeCells" || id === "pets.slug")
+      void refreshPet(ctx, next);
     if (id.startsWith("usage.")) {
       if (usageTimer) clearInterval(usageTimer);
       usageTimer = undefined;
@@ -1239,7 +1364,13 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
 
   async function showSettingsPicker(ctx: ExtensionContext): Promise<void> {
     try {
+      petSettingsPets = await listCodexPets();
+    } catch {
+      petSettingsPets = [];
+    }
+    try {
       await ctx.ui.custom((tui, theme, _kb, done) => {
+        requestSettingsRender = () => tui.requestRender();
         const container = new Container();
         container.addChild(
           new (class {
@@ -1285,8 +1416,10 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
         };
       });
     } finally {
-      if (petPreviewState !== undefined) {
+      requestSettingsRender = undefined;
+      if (petPreviewState !== undefined || petSettingsPreviewActive) {
         petPreviewState = undefined;
+        setPetSettingsPreviewActive(ctx, false);
         updateFooter(ctx);
       }
     }
@@ -1414,13 +1547,14 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
 
           const cfg = config(ctx);
           const cfgForPets = cfg;
+          const shouldRenderPet = shouldRenderPetInFooter(cfgForPets);
           const requestedPetPlacement = cfgForPets.pets.placement;
           const requestedPetSizeCells = petSizeCellsForPlacement(
             requestedPetPlacement,
             cfgForPets.pets.sizeCells,
           );
           const inlinePet = Boolean(
-            cfgForPets.pets.enabled &&
+            shouldRenderPet &&
             pet &&
             isInlinePetPlacement(requestedPetPlacement) &&
             width >= requestedPetSizeCells + 32,
@@ -1502,7 +1636,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
           }
 
           const petLines: string[] = [];
-          if (cfgForPets.pets.enabled) {
+          if (shouldRenderPet) {
             if (pet) {
               const { state: petState, elapsedMs } = currentPetAnimation(ctx, cfgForPets);
               if (freezePetFrame) {
@@ -1554,7 +1688,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
             }
           }
 
-          if (!cfgForPets.pets.enabled || petLines.length === 0)
+          if (!shouldRenderPet || petLines.length === 0)
             return withPendingPetKittyCleanup(textLines);
 
           if (inlinePet) {
@@ -1601,12 +1735,14 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   function updateFooter(ctx: ExtensionContext): void {
     const cfg = config(ctx);
     const resizeFrozen = petResizeFrozen();
+    const shouldAnimatePet = shouldLoadPetForConfig(cfg);
+    const shouldRenderPet = shouldRenderPetInFooter(cfg);
     stopPetAnimation();
-    if (cfg.pets.enabled && !resizeFrozen) startPetAnimation(ctx);
+    if (shouldAnimatePet && !resizeFrozen) startPetAnimation(ctx);
     if (!resizeFrozen && shouldRunIdleEmotes(ctx, cfg)) schedulePetIdleEmote(ctx, cfg);
     else stopPetIdleEmotes();
 
-    if (cfg.footer.mode === "replace" || cfg.pets.enabled) {
+    if (cfg.footer.mode === "replace" || shouldRenderPet) {
       setStatus(ctx, undefined);
       installFooter(ctx);
       return;
@@ -1768,6 +1904,11 @@ export const _test = {
   readRawConfig,
   supportsFast,
   combineInlinePetFooter,
+  PET_AUTO_VALUE,
+  readyPetPickerValues,
+  petConfigPickerValue,
+  petSlugFromPickerValue,
+  petPickerDescription,
   parseUsageSnapshot,
   formatPercent,
   formatUsageSnapshot,

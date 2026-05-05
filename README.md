@@ -42,7 +42,7 @@ Codex pets are an OpenAI Codex app feature, so the floating overlay and pet pick
 /pets list          # list local custom pets
 ```
 
-You can also enable **Footer pet** in `/openai-settings` and tune placement (`inline-right` by default), idle, thinking/streaming, tool-execution, and any failed-tool animation states, plus random idle emotes and size.
+You can also enable **Footer pet** in `/openai-settings`, cycle installed pets with the **Pet** row, preview the selected pet in the footer, and tune placement (`inline-right` by default), idle, thinking/streaming, tool-execution, and any failed-tool animation states, plus random idle emotes and size.
 
 To create a custom pet for the Codex app:
 
