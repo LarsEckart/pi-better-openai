@@ -79,7 +79,7 @@ const OPENAI_SETTINGS_COMMAND = "openai-settings";
 const FLAG = "fast";
 const PET_RESIZE_FREEZE_MS = 120;
 const PET_RENDER_CACHE_LIMIT = 48;
-const PET_AUTO_VALUE = "first ready pet";
+const PET_EMPTY_VALUE = "not selected";
 const SERVICE_TIER = "priority";
 type SettingsPickerItem = {
   id: string;
@@ -146,15 +146,15 @@ function petSizeCellsForPlacement(placement: PetPlacement, sizeCells: number): n
 
 function readyPetPickerValues(pets: CodexPetPackage[]): string[] | undefined {
   const readyPets = pets.filter((pet) => pet.hasSpritesheet);
-  return readyPets.length > 0 ? [PET_AUTO_VALUE, ...readyPets.map((pet) => pet.slug)] : undefined;
+  return readyPets.length > 0 ? readyPets.map((pet) => pet.slug) : undefined;
 }
 
 function petConfigPickerValue(cfg: ResolvedConfig): string {
-  return cfg.pets.slug || PET_AUTO_VALUE;
+  return cfg.pets.slug || PET_EMPTY_VALUE;
 }
 
 function petSlugFromPickerValue(value: string): string {
-  return value === PET_AUTO_VALUE ? "" : value;
+  return value === PET_EMPTY_VALUE ? "" : value;
 }
 
 function petPickerLookupKey(value: string): string {
@@ -177,9 +177,14 @@ function petPickerDescription(cfg: ResolvedConfig, pets: CodexPetPackage[]): str
   const readyPets = pets.filter((pet) => pet.hasSpritesheet);
   if (readyPets.length === 0)
     return "No ready custom pets found. Use /pets help to create one, then return here.";
-  const selectedPet = cfg.pets.slug ? findPickerPet(cfg.pets.slug, readyPets) : readyPets[0];
+  if (!cfg.pets.slug) {
+    const firstPet = readyPets[0];
+    const lastPet = readyPets[readyPets.length - 1];
+    return `No pet selected. Enter/Space/→ selects ${firstPet.name}; ← selects ${lastPet.name}.`;
+  }
+  const selectedPet = findPickerPet(cfg.pets.slug, readyPets);
   const selected = selectedPet
-    ? `${cfg.pets.slug ? "Selected" : "Auto"}: ${selectedPet.name} (${selectedPet.slug})`
+    ? `Selected: ${selectedPet.name} (${selectedPet.slug})`
     : `Selected: ${cfg.pets.slug}`;
   return `${selected}. Enter/Space/→ cycles pets; ← cycles back. Preview appears in the footer while this menu is open.`;
 }
@@ -885,7 +890,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       `Image enabled: ${cfg.image.enabled}`,
       `Image default save: ${cfg.image.defaultSave}`,
       `Pet enabled: ${cfg.pets.enabled}`,
-      `Pet slug: ${cfg.pets.slug || "first ready pet"}`,
+      `Pet slug: ${cfg.pets.slug || PET_EMPTY_VALUE}`,
       `Pet placement: ${cfg.pets.placement}`,
       `Pet failed tool state: ${cfg.pets.failedToolState}`,
       `Pet idle emotes: ${cfg.pets.idleEmotes} (${cfg.pets.idleEmoteIntervalMs}ms)`,
@@ -1477,7 +1482,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
 
       const next = writePetConfig(ctx, {
         enabled: true,
-        ...(slug ? { slug: selectedPet.slug } : {}),
+        slug: selectedPet.slug,
       });
       updateFooter(ctx);
       await refreshPet(ctx, next, true);
@@ -1957,7 +1962,7 @@ export const _test = {
   readRawConfig,
   supportsFast,
   combineInlinePetFooter,
-  PET_AUTO_VALUE,
+  PET_EMPTY_VALUE,
   readyPetPickerValues,
   petConfigPickerValue,
   petSlugFromPickerValue,

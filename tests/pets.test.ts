@@ -352,10 +352,10 @@ describe("Codex pets helpers", () => {
     ];
     const cfg = { pets: { slug: "" } } as Parameters<typeof _test.petConfigPickerValue>[0];
 
-    expect(_test.readyPetPickerValues(pets)).toEqual([_test.PET_AUTO_VALUE, "stacky-plus"]);
-    expect(_test.petConfigPickerValue(cfg)).toBe(_test.PET_AUTO_VALUE);
-    expect(_test.petSlugFromPickerValue(_test.PET_AUTO_VALUE)).toBe("");
-    expect(_test.petPickerDescription(cfg, pets)).toContain("Auto: Stacky Plus (stacky-plus)");
+    expect(_test.readyPetPickerValues(pets)).toEqual(["stacky-plus"]);
+    expect(_test.petConfigPickerValue(cfg)).toBe(_test.PET_EMPTY_VALUE);
+    expect(_test.petSlugFromPickerValue(_test.PET_EMPTY_VALUE)).toBe("");
+    expect(_test.petPickerDescription(cfg, pets)).toContain("No pet selected.");
 
     cfg.pets.slug = "stacky-plus";
     expect(_test.petConfigPickerValue(cfg)).toBe("stacky-plus");
