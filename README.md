@@ -36,10 +36,11 @@ pi install npm:pi-better-openai
 Codex pets are an OpenAI Codex app feature, so the floating overlay and pet picker are still controlled by Codex (`Settings → Appearance → Pets` or `/pet`). This extension can also render compatible custom pet spritesheets directly in pi's Better OpenAI footer.
 
 ```bash
-/pets wake          # render the first ready custom pet
-/pets wake <slug>   # render a specific pet
+/pets wake          # render the selected pet, or the first ready pet
+/pets wake <slug>   # render a specific ready pet
+/pets select <slug> # select a ready pet without changing visibility
 /pets tuck          # hide it
-/pets list          # list local custom pets
+/pets list          # list local custom pets and readiness diagnostics
 ```
 
 You can also enable **Footer pet** in `/openai-settings`, cycle installed pets with the **Pet** row, preview the selected pet in the footer, and tune placement (`inline-right` by default), idle, thinking/streaming, tool-execution, and any failed-tool animation states, plus random idle emotes and size.

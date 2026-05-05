@@ -158,18 +158,119 @@ function petLookupKey(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
-function selectPet(pets: CodexPetPackage[], slug?: string): CodexPetPackage | undefined {
+function petMatchesLookup(pet: CodexPetPackage, requested: string): boolean {
+  return (
+    petLookupKey(pet.slug) === requested ||
+    (pet.id !== undefined && petLookupKey(pet.id) === requested) ||
+    petLookupKey(pet.name) === requested
+  );
+}
+
+export function findCodexPet(pets: CodexPetPackage[], value?: string): CodexPetPackage | undefined {
+  const requested = value?.trim() ? petLookupKey(value.trim()) : "";
+  if (!requested) return undefined;
+  return pets.find((pet) => petMatchesLookup(pet, requested));
+}
+
+export function findReadyCodexPet(
+  pets: CodexPetPackage[],
+  value?: string,
+): CodexPetPackage | undefined {
   const ready = pets.filter((pet) => pet.hasSpritesheet);
-  if (slug?.trim()) {
-    const requested = petLookupKey(slug.trim());
-    return ready.find(
-      (pet) =>
-        petLookupKey(pet.slug) === requested ||
-        (pet.id !== undefined && petLookupKey(pet.id) === requested) ||
-        petLookupKey(pet.name) === requested,
-    );
+  if (!value?.trim()) return ready[0];
+  const requested = petLookupKey(value.trim());
+  return ready.find((pet) => petMatchesLookup(pet, requested));
+}
+
+function selectPet(pets: CodexPetPackage[], slug?: string): CodexPetPackage | undefined {
+  return findReadyCodexPet(pets, slug);
+}
+
+export type CodexPetSelectionIssue = {
+  short: string;
+  message: string;
+};
+
+export function formatCodexPetSetupInstructions(home = codexHome()): string {
+  return [
+    "Expected folder:",
+    `  ${codexPetsDir(home)}/<pet-name>/`,
+    "",
+    "Expected files:",
+    "  pet.json",
+    "  spritesheet.webp",
+    "",
+    "Create one:",
+    "  $skill-installer hatch-pet",
+    "  Cmd/Ctrl+K → Force Reload Skills",
+    "  $hatch-pet create a new pet inspired by pi-better-openai",
+  ].join("\n");
+}
+
+export function describeCodexPetSelectionIssue(
+  pets: CodexPetPackage[],
+  slug?: string,
+  home = codexHome(),
+): CodexPetSelectionIssue {
+  const requestedSlug = slug?.trim();
+  const readyPets = pets.filter((pet) => pet.hasSpritesheet);
+
+  if (requestedSlug) {
+    const matchingPet = findCodexPet(pets, requestedSlug);
+    if (matchingPet && !matchingPet.hasSpritesheet) {
+      return {
+        short: `Pet "${matchingPet.name}" is not ready.`,
+        message: [
+          `Pet "${matchingPet.name}" (${matchingPet.slug}) exists but is not ready.`,
+          `Missing or unreadable file: ${matchingPet.spritesheetPath}`,
+          "",
+          "Run /pets list for diagnostics, then fix the pet folder:",
+          `  ${matchingPet.dir}/`,
+        ].join("\n"),
+      };
+    }
+
+    const readyList = readyPets.length
+      ? ["Ready pets:", ...readyPets.map((pet) => `  - ${pet.slug} (${pet.name})`)].join("\n")
+      : formatNoReadyCodexPetsMessage(pets, home);
+    return {
+      short: `No ready pet matching "${requestedSlug}".`,
+      message: [`No ready pet matching "${requestedSlug}".`, "", readyList].join("\n"),
+    };
   }
-  return ready[0];
+
+  if (pets.length === 0) {
+    return {
+      short: "No custom Codex pets found.",
+      message: formatNoReadyCodexPetsMessage(pets, home),
+    };
+  }
+
+  return {
+    short: "No ready custom Codex pet found.",
+    message: formatNoReadyCodexPetsMessage(pets, home),
+  };
+}
+
+export function formatNoReadyCodexPetsMessage(pets: CodexPetPackage[], home = codexHome()): string {
+  if (pets.length === 0) {
+    return [
+      "No custom Codex pets found.",
+      "",
+      `Looked in: ${codexPetsDir(home)}`,
+      "",
+      formatCodexPetSetupInstructions(home),
+    ].join("\n");
+  }
+
+  return [
+    "Found custom Codex pets, but none are ready.",
+    "",
+    "A ready pet needs both pet.json and spritesheet.webp in its pet folder.",
+    "Run /pets list to see what needs fixing, or create a new pet:",
+    "",
+    formatCodexPetSetupInstructions(home),
+  ].join("\n");
 }
 
 function kittyImageBaseForPet(slug: string): number {
@@ -420,13 +521,7 @@ export function formatCodexPetsHelp(home = codexHome()): string {
     `  /${PETS_COMMAND} select <slug> Select a pet without changing visibility`,
     `  /${PETS_COMMAND} list          List local custom pets`,
     "",
-    "Create a custom Codex pet:",
-    "  $skill-installer hatch-pet",
-    "  Cmd/Ctrl+K → Force Reload Skills",
-    "  $hatch-pet create a new pet inspired by pi-better-openai",
-    "",
-    `Custom pet folder: ${codexPetsDir(home)}/<pet-name>/`,
-    "Expected files: pet.json and spritesheet.webp",
+    formatCodexPetSetupInstructions(home),
     "",
     "The Codex app overlay is still controlled by Codex Settings → Appearance → Pets or /pet.",
   ].join("\n");
@@ -485,21 +580,35 @@ export async function openAIPetsArgumentCompletions(
     : null;
 }
 
+export function formatCodexPetsListMessage(pets: CodexPetPackage[], home = codexHome()): string {
+  if (pets.length === 0) return formatNoReadyCodexPetsMessage(pets, home);
+
+  const petLines = pets
+    .map((pet) => {
+      const status = pet.hasSpritesheet ? "ready" : `missing ${pet.spritesheetPath}`;
+      return `${pet.name} (${pet.slug}) — ${status}${pet.description ? `\n  ${pet.description}` : ""}`;
+    })
+    .join("\n");
+
+  if (pets.some((pet) => pet.hasSpritesheet)) return petLines;
+
+  return [
+    "Found custom Codex pets, but none are ready.",
+    "",
+    petLines,
+    "",
+    "Fix one of the pet folders above, or create a new pet:",
+    "",
+    formatCodexPetSetupInstructions(home),
+  ].join("\n");
+}
+
 async function notifyPetsList(ctx: ExtensionContext): Promise<void> {
   const home = codexHome();
   const pets = await listCodexPets(home);
-  if (pets.length === 0) {
-    ctx.ui.notify(`No custom Codex pets found in ${codexPetsDir(home)}.`, "warning");
-    return;
-  }
   ctx.ui.notify(
-    pets
-      .map((pet) => {
-        const status = pet.hasSpritesheet ? "ready" : "missing spritesheet.webp";
-        return `${pet.name} (${pet.slug}) — ${status}${pet.description ? `\n  ${pet.description}` : ""}`;
-      })
-      .join("\n"),
-    "info",
+    formatCodexPetsListMessage(pets, home),
+    pets.some((pet) => pet.hasSpritesheet) ? "info" : "warning",
   );
 }
 
@@ -541,5 +650,7 @@ export const _petsTest = {
   codexPetsDir,
   petInfoFromJson,
   petLookupKey,
+  findCodexPet,
+  findReadyCodexPet,
   selectPet,
 };

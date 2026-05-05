@@ -59,6 +59,10 @@ import {
   type LoadedCodexPet,
   loadCodexPet,
   animationFrameAt,
+  codexHome,
+  describeCodexPetSelectionIssue,
+  findReadyCodexPet,
+  formatNoReadyCodexPetsMessage,
   listCodexPets,
   nextAnimationFrameDelayMs,
   PET_ANIMATION_ROWS,
@@ -172,12 +176,36 @@ function findPickerPet(value: string, pets: CodexPetPackage[]): CodexPetPackage 
 function petPickerDescription(cfg: ResolvedConfig, pets: CodexPetPackage[]): string {
   const readyPets = pets.filter((pet) => pet.hasSpritesheet);
   if (readyPets.length === 0)
-    return "No ready custom pets found. Run /pets list for setup details.";
+    return "No ready custom pets found. Use /pets help to create one, then return here.";
   const selectedPet = cfg.pets.slug ? findPickerPet(cfg.pets.slug, readyPets) : readyPets[0];
   const selected = selectedPet
     ? `${cfg.pets.slug ? "Selected" : "Auto"}: ${selectedPet.name} (${selectedPet.slug})`
     : `Selected: ${cfg.pets.slug}`;
   return `${selected}. Enter/Space/→ cycles pets; ← cycles back. Preview appears in the footer while this menu is open.`;
+}
+
+function formatPetSelectPrompt(
+  pets: CodexPetPackage[],
+  home = codexHome(),
+): { message: string; level: "info" | "warning" } {
+  const readyPets = pets.filter((pet) => pet.hasSpritesheet);
+  if (readyPets.length === 0) {
+    return { message: formatNoReadyCodexPetsMessage(pets, home), level: "warning" };
+  }
+
+  const brokenPets = pets.filter((pet) => !pet.hasSpritesheet);
+  const lines = [
+    "Choose one with /pets select <slug>:",
+    ...readyPets.map((pet) => `- ${pet.slug} (${pet.name})`),
+  ];
+  if (brokenPets.length > 0) {
+    lines.push(
+      "",
+      "Not ready:",
+      ...brokenPets.map((pet) => `- ${pet.slug} (${pet.name}) — missing ${pet.spritesheetPath}`),
+    );
+  }
+  return { message: lines.join("\n"), level: "info" };
 }
 
 function spaces(width: number): string {
@@ -666,15 +694,18 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
         resetCodexPetKittyCache(previousPet, petImageId);
       }
       pet = loadedPet;
+      const petIssue = pet
+        ? undefined
+        : describeCodexPetSelectionIssue(await listCodexPets(), cfg.pets.slug || undefined);
       petAnimationState = undefined;
       resetPetRenderCache();
       petLoadKey = key;
-      if (!pet) petError = "No ready custom Codex pet found.";
+      if (!pet && petIssue) petError = petIssue.short;
       if (petLoadNotify) {
         ctx.ui.notify(
           pet
             ? `Rendering ${pet.pet.name} in the Better OpenAI footer.`
-            : "No ready custom Codex pet found. Run /pets list.",
+            : (petIssue?.message ?? "No ready custom Codex pet found."),
           pet ? "info" : "warning",
         );
       }
@@ -1435,7 +1466,19 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   registerOpenAIImage(pi, config);
   registerOpenAIPets(pi, {
     wake: async (ctx, slug) => {
-      const next = writePetConfig(ctx, { enabled: true, ...(slug ? { slug } : {}) });
+      const pets = await listCodexPets();
+      const requestedSlug = (slug ?? config(ctx).pets.slug) || undefined;
+      const selectedPet = findReadyCodexPet(pets, requestedSlug);
+      if (!selectedPet) {
+        const issue = describeCodexPetSelectionIssue(pets, requestedSlug);
+        ctx.ui.notify(issue.message, "warning");
+        return;
+      }
+
+      const next = writePetConfig(ctx, {
+        enabled: true,
+        ...(slug ? { slug: selectedPet.slug } : {}),
+      });
       updateFooter(ctx);
       await refreshPet(ctx, next, true);
     },
@@ -1453,19 +1496,29 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       ctx.ui.notify("Footer pet tucked away.", "info");
     },
     select: async (ctx, slug) => {
+      const pets = await listCodexPets();
       if (!slug) {
-        const pets = await listCodexPets();
-        ctx.ui.notify(
-          pets.length
-            ? `Choose one with /pets select <slug>:\n${pets.map((item) => `- ${item.slug}`).join("\n")}`
-            : "No custom Codex pets found.",
-          pets.length ? "info" : "warning",
-        );
+        const prompt = formatPetSelectPrompt(pets);
+        ctx.ui.notify(prompt.message, prompt.level);
         return;
       }
-      const next = writePetConfig(ctx, { slug });
+
+      const selectedPet = findReadyCodexPet(pets, slug);
+      if (!selectedPet) {
+        const issue = describeCodexPetSelectionIssue(pets, slug);
+        ctx.ui.notify(issue.message, "warning");
+        return;
+      }
+
+      const next = writePetConfig(ctx, { slug: selectedPet.slug });
       updateFooter(ctx);
-      await refreshPet(ctx, next, true);
+      if (shouldLoadPetForConfig(next)) await refreshPet(ctx, next, true);
+      else {
+        ctx.ui.notify(
+          `Selected ${selectedPet.name} (${selectedPet.slug}) for the footer pet. Use /pets wake to show it.`,
+          "info",
+        );
+      }
     },
   });
 
@@ -1909,6 +1962,7 @@ export const _test = {
   petConfigPickerValue,
   petSlugFromPickerValue,
   petPickerDescription,
+  formatPetSelectPrompt,
   parseUsageSnapshot,
   formatPercent,
   formatUsageSnapshot,

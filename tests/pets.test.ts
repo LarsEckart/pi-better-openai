@@ -12,7 +12,10 @@ import {
   animationFrameAt,
   codexHome,
   deleteCodexPetKittyPlacement,
+  describeCodexPetSelectionIssue,
   formatCodexPetsHelp,
+  formatCodexPetsListMessage,
+  formatNoReadyCodexPetsMessage,
   listCodexPets,
   loadCodexPet,
   nextAnimationFrameDelayMs,
@@ -66,6 +69,91 @@ describe("Codex pets helpers", () => {
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+
+  test("returns empty lists and actionable setup text when no pets exist", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "pi-better-openai-pets-empty-"));
+    try {
+      expect(await listCodexPets(tempDir)).toEqual([]);
+      const missingDirMessage = formatNoReadyCodexPetsMessage([], tempDir);
+      expect(missingDirMessage).toContain("No custom Codex pets found.");
+      expect(missingDirMessage).toContain(join(tempDir, "pets"));
+      expect(missingDirMessage).toContain("$skill-installer hatch-pet");
+
+      mkdirSync(join(tempDir, "pets"), { recursive: true });
+      expect(await listCodexPets(tempDir)).toEqual([]);
+      expect(formatCodexPetsListMessage([], tempDir)).toContain("Expected folder:");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("reports custom pets that are missing spritesheets as not ready", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "pi-better-openai-pets-broken-"));
+    try {
+      const petDir = join(tempDir, "pets", "ghost");
+      mkdirSync(petDir, { recursive: true });
+      writeFileSync(join(petDir, "pet.json"), JSON.stringify({ name: "Ghost" }));
+
+      const pets = await listCodexPets(tempDir);
+      expect(pets).toHaveLength(1);
+      expect(pets[0]).toMatchObject({ slug: "ghost", hasSpritesheet: false });
+      expect(formatCodexPetsListMessage(pets, tempDir)).toContain(
+        "Ghost (ghost) — missing spritesheet.webp",
+      );
+
+      const issue = describeCodexPetSelectionIssue(pets, "ghost", tempDir);
+      expect(issue.short).toBe('Pet "Ghost" is not ready.');
+      expect(issue.message).toContain("exists but is not ready");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("explains requested pet slugs that do not match a ready pet", () => {
+    const pets = [
+      {
+        slug: "stacky-plus",
+        name: "Stacky Plus",
+        dir: "/tmp/stacky-plus",
+        spritesheetPath: "spritesheet.webp",
+        hasSpritesheet: true,
+      },
+    ];
+
+    const issue = describeCodexPetSelectionIssue(pets, "missing", "/tmp/codex");
+    expect(issue.short).toBe('No ready pet matching "missing".');
+    expect(issue.message).toContain("Ready pets:");
+    expect(issue.message).toContain("stacky-plus");
+  });
+
+  test("formats /pets select prompts with only ready pets as choices", () => {
+    const pets = [
+      {
+        slug: "ready",
+        name: "Ready",
+        dir: "/tmp/ready",
+        spritesheetPath: "spritesheet.webp",
+        hasSpritesheet: true,
+      },
+      {
+        slug: "broken",
+        name: "Broken",
+        dir: "/tmp/broken",
+        spritesheetPath: "spritesheet.webp",
+        hasSpritesheet: false,
+      },
+    ];
+
+    expect(_test.formatPetSelectPrompt(pets, "/tmp/codex")).toEqual({
+      message:
+        "Choose one with /pets select <slug>:\n- ready (Ready)\n\nNot ready:\n- broken (Broken) — missing spritesheet.webp",
+      level: "info",
+    });
+
+    const noReadyPrompt = _test.formatPetSelectPrompt([pets[1]], "/tmp/codex");
+    expect(noReadyPrompt.level).toBe("warning");
+    expect(noReadyPrompt.message).toContain("Found custom Codex pets, but none are ready.");
   });
 
   test("uses the official Codex atlas row order and frame durations", () => {
