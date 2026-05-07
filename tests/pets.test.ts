@@ -11,6 +11,8 @@ import {
   type PetFrame,
   animationFrameAt,
   codexHome,
+  CodexPetKittyManager,
+  deleteCodexPetKittyImage,
   deleteCodexPetKittyPlacement,
   describeCodexPetSelectionIssue,
   formatCodexPetsHelp,
@@ -285,13 +287,14 @@ describe("Codex pets helpers", () => {
       },
       states: { idle: [frame] } as LoadedCodexPet["states"],
     } satisfies LoadedCodexPet;
+    const manager = new CodexPetKittyManager(7);
 
     const firstRender = renderCodexPetFrame(
       loaded,
       "idle",
       8,
       { fg: (_color, value) => value },
-      { sizeCells: 4, imageId: 7, now: 0 },
+      { sizeCells: 4, imageId: 7, now: 0, kittyManager: manager },
     ).join("");
     expect(firstRender).toContain(deleteCodexPetKittyPlacement(42));
     expect(firstKittyImageId(firstRender)).toBe(7);
@@ -305,11 +308,68 @@ describe("Codex pets helpers", () => {
       "idle",
       8,
       { fg: (_color, value) => value },
-      { sizeCells: 4, imageId: 7, now: 0 },
+      { sizeCells: 4, imageId: 7, now: 0, kittyManager: manager },
     ).join("");
     expect(secondRender).toContain(deleteCodexPetKittyPlacement(42));
     expect(firstKittyImageId(secondRender)).not.toBe(42);
     expect(secondRender).not.toContain("a=t");
+  });
+
+  test("centralizes Kitty frame upload and cleanup lifecycle", () => {
+    setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+    const frame: PetFrame = {
+      rawRgbaData: Buffer.from([0, 0, 0, 255]).toString("base64"),
+      kittyImageId: 84,
+      mimeType: "image/png",
+      durationMs: 100,
+      widthPx: 1,
+      heightPx: 1,
+    };
+    const loaded = {
+      pet: {
+        slug: "kitty-manager",
+        name: "Kitty Manager",
+        dir: "/tmp",
+        spritesheetPath: "spritesheet.webp",
+        hasSpritesheet: true,
+      },
+      states: { idle: [frame] } as LoadedCodexPet["states"],
+    } satisfies LoadedCodexPet;
+    const manager = new CodexPetKittyManager(9);
+
+    const firstRender = renderCodexPetFrame(
+      loaded,
+      "idle",
+      8,
+      { fg: (_color, value) => value },
+      { sizeCells: 4, imageId: 9, now: 0, kittyManager: manager },
+    ).join("");
+    expect(firstKittyImageId(firstRender)).toBe(9);
+    expect(firstRender).toContain("a=t");
+
+    const secondRender = renderCodexPetFrame(
+      loaded,
+      "idle",
+      8,
+      { fg: (_color, value) => value },
+      { sizeCells: 4, imageId: 9, now: 0, kittyManager: manager },
+    ).join("");
+    expect(secondRender).not.toContain("a=t");
+
+    manager.invalidate(loaded);
+    const cleanup = manager.takeCleanupSequence();
+    expect(cleanup.startsWith(deleteCodexPetKittyPlacement(9))).toBe(true);
+    expect(firstKittyImageId(cleanup)).toBeUndefined();
+    expect(cleanup).toContain(deleteCodexPetKittyImage(84));
+
+    const rerender = renderCodexPetFrame(
+      loaded,
+      "idle",
+      8,
+      { fg: (_color, value) => value },
+      { sizeCells: 4, imageId: 9, now: 0, kittyManager: manager },
+    ).join("");
+    expect(rerender).toContain("a=t");
   });
 
   test("completes pet names for wake and select subcommands", async () => {

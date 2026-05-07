@@ -401,14 +401,22 @@ export function nextAnimationFrameDelayMs(
   return Math.max(1, Math.ceil(frames[0]?.durationMs ?? 120));
 }
 
-const previousKittyFrameByPlacement = new Map<number, number>();
-
-export function resetCodexPetKittyCache(pet?: LoadedCodexPet, placementImageId?: number): void {
-  if (placementImageId !== undefined) previousKittyFrameByPlacement.delete(placementImageId);
+function markCodexPetKittyFramesUnuploaded(pet?: LoadedCodexPet): void {
   if (!pet) return;
   for (const frames of Object.values(pet.states)) {
     for (const frame of frames) frame.kittyUploaded = false;
   }
+}
+
+function codexPetKittyImageIds(pet?: LoadedCodexPet): number[] {
+  if (!pet) return [];
+  const imageIds = new Set<number>();
+  for (const frames of Object.values(pet.states)) {
+    for (const frame of frames) {
+      if (frame.kittyImageId !== undefined) imageIds.add(frame.kittyImageId);
+    }
+  }
+  return Array.from(imageIds);
 }
 
 export function deleteCodexPetKittyPlacement(imageId: number): string {
@@ -450,39 +458,95 @@ function encodeKittyRawRgba(frame: PetFrame, imageId: number): string {
   return chunks.join("");
 }
 
-function renderKittyPetFrame(
-  frame: PetFrame,
-  width: number,
-  options: { sizeCells: number; imageId: number },
-): string[] {
-  const columns = Math.max(1, Math.min(Math.max(1, width - 2), options.sizeCells));
-  const rows = calculateImageRows(
-    { widthPx: frame.widthPx, heightPx: frame.heightPx },
-    columns,
-    getCellDimensions(),
-  );
-  const frameImageId = frame.kittyImageId ?? options.imageId;
-  const previousFrameImageId = previousKittyFrameByPlacement.get(options.imageId);
-  const deletePrevious =
-    previousFrameImageId !== undefined && previousFrameImageId !== frameImageId
-      ? deleteCodexPetKittyPlacement(previousFrameImageId)
-      : "";
-  const deleteCurrent = deleteCodexPetKittyPlacement(frameImageId);
-  const upload = frame.kittyUploaded ? "" : encodeKittyRawRgba(frame, frameImageId);
-  frame.kittyUploaded = true;
-  previousKittyFrameByPlacement.set(options.imageId, frameImageId);
-  // Recent pi-tui versions automatically free Kitty image IDs they own on changed lines.
-  // Pet frames are managed here and intentionally reused across animation loops, so keep
-  // the first Kitty command pointed at a harmless footer-placement ID, not a frame ID.
-  const hostCleanupSentinel =
-    frameImageId !== options.imageId ? deleteCodexPetKittyPlacement(options.imageId) : "";
-  const sequence = `${hostCleanupSentinel}${deletePrevious}${deleteCurrent}${upload}${placeKittyImage(frameImageId, columns, rows)}`;
-  const lines: string[] = [];
-  for (let i = 0; i < rows - 1; i++) lines.push("");
-  const moveUp = rows > 1 ? `\x1b[${rows - 1}A` : "";
-  const moveDown = rows > 1 ? `\x1b[${rows - 1}B` : "";
-  lines.push(moveUp + sequence + moveDown);
-  return lines;
+export class CodexPetKittyManager {
+  private previousFrameImageId: number | undefined;
+  private readonly uploadedFrameImageIds = new Set<number>();
+  private readonly pendingCleanupImageIds = new Set<number>();
+
+  constructor(readonly placementImageId: number) {}
+
+  queueCleanup(pet?: LoadedCodexPet): void {
+    for (const imageId of codexPetKittyImageIds(pet)) this.pendingCleanupImageIds.add(imageId);
+  }
+
+  invalidate(pet?: LoadedCodexPet): void {
+    this.queueCleanup(pet);
+    this.previousFrameImageId = undefined;
+    this.uploadedFrameImageIds.clear();
+    markCodexPetKittyFramesUnuploaded(pet);
+  }
+
+  resetForResize(pet?: LoadedCodexPet): void {
+    this.invalidate(pet);
+  }
+
+  dispose(pet?: LoadedCodexPet): string {
+    this.invalidate(pet);
+    return this.takeCleanupSequence();
+  }
+
+  takeCleanupSequence(): string {
+    if (this.pendingCleanupImageIds.size === 0) return "";
+    const sequence = `${deleteCodexPetKittyPlacement(this.placementImageId)}${Array.from(
+      this.pendingCleanupImageIds,
+    )
+      .map((imageId) => deleteCodexPetKittyImage(imageId))
+      .join("")}`;
+    this.pendingCleanupImageIds.clear();
+    return sequence;
+  }
+
+  renderFrame(frame: PetFrame, width: number, options: { sizeCells: number }): string[] {
+    const columns = Math.max(1, Math.min(Math.max(1, width - 2), options.sizeCells));
+    const rows = calculateImageRows(
+      { widthPx: frame.widthPx, heightPx: frame.heightPx },
+      columns,
+      getCellDimensions(),
+    );
+    const frameImageId = frame.kittyImageId ?? this.placementImageId;
+    const deletePrevious =
+      this.previousFrameImageId !== undefined && this.previousFrameImageId !== frameImageId
+        ? deleteCodexPetKittyPlacement(this.previousFrameImageId)
+        : "";
+    const deleteCurrent = deleteCodexPetKittyPlacement(frameImageId);
+    const upload = this.uploadedFrameImageIds.has(frameImageId)
+      ? ""
+      : encodeKittyRawRgba(frame, frameImageId);
+    this.uploadedFrameImageIds.add(frameImageId);
+    frame.kittyUploaded = true;
+    this.previousFrameImageId = frameImageId;
+    // Recent pi-tui versions automatically free Kitty image IDs they own on changed lines.
+    // Pet frames are managed here and intentionally reused across animation loops, so keep
+    // the first Kitty command pointed at a harmless footer-placement ID, not a frame ID.
+    const hostCleanupSentinel =
+      frameImageId !== this.placementImageId
+        ? deleteCodexPetKittyPlacement(this.placementImageId)
+        : "";
+    const sequence = `${hostCleanupSentinel}${deletePrevious}${deleteCurrent}${upload}${placeKittyImage(frameImageId, columns, rows)}`;
+    const lines: string[] = [];
+    for (let i = 0; i < rows - 1; i++) lines.push("");
+    const moveUp = rows > 1 ? `\x1b[${rows - 1}A` : "";
+    const moveDown = rows > 1 ? `\x1b[${rows - 1}B` : "";
+    lines.push(moveUp + sequence + moveDown);
+    return lines;
+  }
+}
+
+const defaultKittyManagers = new Map<number, CodexPetKittyManager>();
+
+function defaultKittyManager(placementImageId: number): CodexPetKittyManager {
+  let manager = defaultKittyManagers.get(placementImageId);
+  if (!manager) {
+    manager = new CodexPetKittyManager(placementImageId);
+    defaultKittyManagers.set(placementImageId, manager);
+  }
+  return manager;
+}
+
+export function resetCodexPetKittyCache(pet?: LoadedCodexPet, placementImageId?: number): void {
+  if (placementImageId !== undefined) defaultKittyManagers.get(placementImageId)?.invalidate(pet);
+  else for (const manager of defaultKittyManagers.values()) manager.invalidate(pet);
+  markCodexPetKittyFramesUnuploaded(pet);
 }
 
 export function renderCodexPetFrame(
@@ -490,7 +554,13 @@ export function renderCodexPetFrame(
   state: PetState,
   width: number,
   theme: ThemeLike,
-  options: { sizeCells: number; imageId: number; now?: number; durationMultiplier?: number },
+  options: {
+    sizeCells: number;
+    imageId: number;
+    now?: number;
+    durationMultiplier?: number;
+    kittyManager?: CodexPetKittyManager;
+  },
 ): string[] {
   const frame = animationFrameAt(
     pet.states[state] ?? pet.states.idle,
@@ -499,7 +569,15 @@ export function renderCodexPetFrame(
   );
   if (!frame) return [];
   const imageProtocol = getCapabilities().images;
-  if (imageProtocol === "kitty") return renderKittyPetFrame(frame, width, options);
+  if (imageProtocol === "kitty") {
+    return (options.kittyManager ?? defaultKittyManager(options.imageId)).renderFrame(
+      frame,
+      width,
+      {
+        sizeCells: options.sizeCells,
+      },
+    );
+  }
   if (!imageProtocol) {
     const fallback = imageFallback(frame.mimeType, {
       widthPx: frame.widthPx,

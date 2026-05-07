@@ -66,10 +66,9 @@ import {
   listCodexPets,
   nextAnimationFrameDelayMs,
   PET_ANIMATION_ROWS,
-  deleteCodexPetKittyImage,
+  CodexPetKittyManager,
   registerOpenAIPets,
   renderCodexPetFrame,
-  resetCodexPetKittyCache,
   _petsTest,
 } from "./src/pets.ts";
 
@@ -391,9 +390,9 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   let petAnimationState: PetState | undefined;
   let petAnimationStartedAt = Date.now();
   const petRenderCache = new Map<string, string[]>();
-  const pendingPetKittyCleanupImageIds = new Set<number>();
   const activeToolCallIds = new Set<string>();
   const petImageId = 0x70657401;
+  const petKittyManager = new CodexPetKittyManager(petImageId);
 
   function refresh(ctx: ExtensionContext): ResolvedConfig {
     cachedConfig = resolveConfig(ctx.cwd || process.cwd());
@@ -455,22 +454,11 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   }
 
   function queuePetKittyCleanup(target = pet): void {
-    if (!target) return;
-    for (const frames of Object.values(target.states)) {
-      for (const frame of frames) {
-        if (frame.kittyImageId !== undefined)
-          pendingPetKittyCleanupImageIds.add(frame.kittyImageId);
-      }
-    }
+    petKittyManager.invalidate(target);
   }
 
   function takePetKittyCleanupSequence(): string {
-    if (pendingPetKittyCleanupImageIds.size === 0) return "";
-    const sequence = Array.from(pendingPetKittyCleanupImageIds)
-      .map((imageId) => deleteCodexPetKittyImage(imageId))
-      .join("");
-    pendingPetKittyCleanupImageIds.clear();
-    return sequence;
+    return petKittyManager.takeCleanupSequence();
   }
 
   function withPendingPetKittyCleanup(lines: string[]): string[] {
@@ -480,9 +468,16 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     return [`${sequence}\x1b[0m${lines[0]}\x1b[0m`, ...lines.slice(1)];
   }
 
-  function flushPetKittyCleanupNow(): void {
-    const sequence = takePetKittyCleanupSequence();
+  function writePetKittySequence(sequence: string): void {
     if (sequence && process.stdout.isTTY) process.stdout.write(sequence);
+  }
+
+  function flushPetKittyCleanupNow(): void {
+    writePetKittySequence(takePetKittyCleanupSequence());
+  }
+
+  function disposePetKittyNow(target = pet): void {
+    writePetKittySequence(petKittyManager.dispose(target));
   }
 
   function rememberPetRender(key: string, lines: string[]): void {
@@ -514,7 +509,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     petResizeTimer = setTimeout(() => {
       petResizeTimer = undefined;
       petResizeFreezeUntil = 0;
-      resetCodexPetKittyCache(pet, petImageId);
+      petKittyManager.resetForResize(pet);
       resetPetRenderCache();
       updateFooter(ctx);
     }, PET_RESIZE_FREEZE_MS);
@@ -658,7 +653,6 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     if (!shouldLoadPetForConfig(cfg)) {
       queuedPetRefresh = undefined;
       queuePetKittyCleanup();
-      resetCodexPetKittyCache(pet, petImageId);
       pet = undefined;
       petError = undefined;
       petLoadKey = undefined;
@@ -694,10 +688,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
         sizeCells: cfg.pets.sizeCells,
       });
       if (!shouldApplyLoadResult()) return;
-      if (previousPet) {
-        queuePetKittyCleanup(previousPet);
-        resetCodexPetKittyCache(previousPet, petImageId);
-      }
+      if (previousPet) queuePetKittyCleanup(previousPet);
       pet = loadedPet;
       const petIssue = pet
         ? undefined
@@ -716,10 +707,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       }
     } catch (error) {
       if (!shouldApplyLoadResult()) return;
-      if (previousPet) {
-        queuePetKittyCleanup(previousPet);
-        resetCodexPetKittyCache(previousPet, petImageId);
-      }
+      if (previousPet) queuePetKittyCleanup(previousPet);
       pet = undefined;
       petLoadKey = key;
       petError = error instanceof Error ? error.message : String(error);
@@ -1038,6 +1026,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
         imageId: petImageId,
         now: elapsedMs,
         durationMultiplier: 1,
+        kittyManager: petKittyManager,
       }),
     ];
   }
@@ -1490,7 +1479,6 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     tuck: (ctx) => {
       writePetConfig(ctx, { enabled: false });
       queuePetKittyCleanup();
-      resetCodexPetKittyCache(pet, petImageId);
       pet = undefined;
       petError = undefined;
       resetPetRenderCache();
@@ -1543,12 +1531,12 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
           stopPetIdleEmotes();
           stopPetAnimation();
           stopPendingPetRenderRequest();
+          disposePetKittyNow();
           footerInstalled = false;
           requestFooterRender = undefined;
         },
         invalidate() {
           queuePetKittyCleanup();
-          resetCodexPetKittyCache(pet, petImageId);
           resetPetRenderCache();
         },
         render(width: number): string[] {
@@ -1732,6 +1720,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
                       imageId: petImageId,
                       now: elapsedMs,
                       durationMultiplier: 1,
+                      kittyManager: petKittyManager,
                     },
                   );
                   petLines.push(...renderedPetLines);
@@ -1778,7 +1767,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
 
   function clearFooter(ctx: ExtensionContext): void {
     if (!footerInstalled) return;
-    flushPetKittyCleanupNow();
+    disposePetKittyNow();
     ctx.ui.setFooter(undefined);
     footerInstalled = false;
     requestFooterRender = undefined;
@@ -1885,7 +1874,6 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   pi.on("session_compact", (_event, ctx) => {
     refreshFooterTotals(ctx);
     queuePetKittyCleanup();
-    resetCodexPetKittyCache(pet, petImageId);
     resetPetRenderCache();
     updateFooter(ctx);
   });
@@ -1893,7 +1881,6 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   pi.on("session_tree", (_event, ctx) => {
     refreshFooterTotals(ctx);
     queuePetKittyCleanup();
-    resetCodexPetKittyCache(pet, petImageId);
     resetPetRenderCache();
     updateFooter(ctx);
   });
@@ -1927,8 +1914,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     usageTimer = undefined;
     activeToolCallIds.clear();
     uninstallPetResizeGuard();
-    queuePetKittyCleanup();
-    flushPetKittyCleanupNow();
+    disposePetKittyNow();
     resetPetRenderCache();
     clearPetFlash();
     stopPetIdleEmotes();
