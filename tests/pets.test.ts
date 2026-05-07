@@ -28,6 +28,20 @@ afterEach(() => {
   resetCapabilitiesCache();
 });
 
+function firstKittyImageId(value: string): number | undefined {
+  const sequenceStart = value.indexOf("\x1b_G");
+  if (sequenceStart === -1) return undefined;
+  const paramsStart = sequenceStart + "\x1b_G".length;
+  const paramsEnd = value.indexOf(";", paramsStart);
+  if (paramsEnd === -1) return undefined;
+  const params = value.slice(paramsStart, paramsEnd);
+  const imageId = params
+    .split(",")
+    .map((param) => param.split("=", 2))
+    .find(([key]) => key === "i")?.[1];
+  return imageId ? Number(imageId) : undefined;
+}
+
 describe("Codex pets helpers", () => {
   test("resolves Codex home and pets directory", () => {
     expect(codexHome({ CODEX_HOME: "/tmp/codex" }, "/home/user")).toBe("/tmp/codex");
@@ -280,6 +294,7 @@ describe("Codex pets helpers", () => {
       { sizeCells: 4, imageId: 7, now: 0 },
     ).join("");
     expect(firstRender).toContain(deleteCodexPetKittyPlacement(42));
+    expect(firstKittyImageId(firstRender)).toBe(7);
     expect(firstRender).toContain("a=t");
     expect(firstRender).toContain("C=1");
     expect(firstRender).toContain("\x1b[1A");
@@ -293,6 +308,7 @@ describe("Codex pets helpers", () => {
       { sizeCells: 4, imageId: 7, now: 0 },
     ).join("");
     expect(secondRender).toContain(deleteCodexPetKittyPlacement(42));
+    expect(firstKittyImageId(secondRender)).not.toBe(42);
     expect(secondRender).not.toContain("a=t");
   });
 

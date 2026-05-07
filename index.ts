@@ -66,7 +66,7 @@ import {
   listCodexPets,
   nextAnimationFrameDelayMs,
   PET_ANIMATION_ROWS,
-  deleteCodexPetKittyPlacement,
+  deleteCodexPetKittyImage,
   registerOpenAIPets,
   renderCodexPetFrame,
   resetCodexPetKittyCache,
@@ -467,7 +467,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   function takePetKittyCleanupSequence(): string {
     if (pendingPetKittyCleanupImageIds.size === 0) return "";
     const sequence = Array.from(pendingPetKittyCleanupImageIds)
-      .map((imageId) => deleteCodexPetKittyPlacement(imageId))
+      .map((imageId) => deleteCodexPetKittyImage(imageId))
       .join("");
     pendingPetKittyCleanupImageIds.clear();
     return sequence;

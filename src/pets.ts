@@ -415,6 +415,10 @@ export function deleteCodexPetKittyPlacement(imageId: number): string {
   return `\x1b_Ga=d,d=i,i=${imageId},p=1,q=2\x1b\\`;
 }
 
+export function deleteCodexPetKittyImage(imageId: number): string {
+  return `\x1b_Ga=d,d=I,i=${imageId},q=2\x1b\\`;
+}
+
 function placeKittyImage(imageId: number, columns: number, rows: number): string {
   return `\x1b_Ga=p,i=${imageId},p=1,c=${columns},r=${rows},q=2,C=1\x1b\\`;
 }
@@ -467,7 +471,12 @@ function renderKittyPetFrame(
   const upload = frame.kittyUploaded ? "" : encodeKittyRawRgba(frame, frameImageId);
   frame.kittyUploaded = true;
   previousKittyFrameByPlacement.set(options.imageId, frameImageId);
-  const sequence = `${deletePrevious}${deleteCurrent}${upload}${placeKittyImage(frameImageId, columns, rows)}`;
+  // Recent pi-tui versions automatically free Kitty image IDs they own on changed lines.
+  // Pet frames are managed here and intentionally reused across animation loops, so keep
+  // the first Kitty command pointed at a harmless footer-placement ID, not a frame ID.
+  const hostCleanupSentinel =
+    frameImageId !== options.imageId ? deleteCodexPetKittyPlacement(options.imageId) : "";
+  const sequence = `${hostCleanupSentinel}${deletePrevious}${deleteCurrent}${upload}${placeKittyImage(frameImageId, columns, rows)}`;
   const lines: string[] = [];
   for (let i = 0; i < rows - 1; i++) lines.push("");
   const moveUp = rows > 1 ? `\x1b[${rows - 1}A` : "";
