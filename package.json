@@ -1,6 +1,6 @@
 {
   "name": "pi-better-openai",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Personal pi extension that improves OpenAI with fast mode, usage stats, and footer polish.",
   "keywords": [
     "fast",
