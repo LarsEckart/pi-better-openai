@@ -1,5 +1,5 @@
-import type { Dirent } from "node:fs";
-import { access, readdir, readFile } from "node:fs/promises";
+import { constants, type Dirent } from "node:fs";
+import { access, readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
@@ -21,6 +21,8 @@ const PET_COLUMNS = 8;
 const PET_ROWS = 9;
 const DEFAULT_CELL_WIDTH = 192;
 const DEFAULT_CELL_HEIGHT = 208;
+const EXPECTED_ATLAS_WIDTH = DEFAULT_CELL_WIDTH * PET_COLUMNS;
+const EXPECTED_ATLAS_HEIGHT = DEFAULT_CELL_HEIGHT * PET_ROWS;
 
 export const PET_ANIMATION_ROWS: Record<PetState, { row: number; durations: number[] }> = {
   idle: { row: 0, durations: [280, 110, 110, 140, 140, 320] },
@@ -42,6 +44,7 @@ export type CodexPetPackage = {
   dir: string;
   spritesheetPath: string;
   hasSpritesheet: boolean;
+  spritesheetIssue?: string;
 };
 
 export type PetFrame = {
@@ -70,6 +73,29 @@ type ThemeLike = {
   fg(color: string, value: string): string;
 };
 
+const TERMINAL_ESCAPE_REGEXP = new RegExp(
+  String.raw`\u001b(?:\][\s\S]*?(?:\u0007|\u001b\\)|[_PX^][\s\S]*?\u001b\\|\[[0-?]*[ -/]*[@-~]|[@-_][0-?]*[ -/]*[@-~])`,
+  "g",
+);
+const CONTROL_CHAR_REGEXP = new RegExp(String.raw`[\u0000-\u001f\u007f-\u009f]+`, "g");
+
+function stripTerminalEscapes(value: string): string {
+  return value.replace(TERMINAL_ESCAPE_REGEXP, "");
+}
+
+function sanitizePetDisplayText(value: string): string | undefined {
+  const sanitized = stripTerminalEscapes(value)
+    .replace(CONTROL_CHAR_REGEXP, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return sanitized || undefined;
+}
+
+function sanitizePetAssetPathText(value: string): string | undefined {
+  const sanitized = stripTerminalEscapes(value).replace(CONTROL_CHAR_REGEXP, "").trim();
+  return sanitized || undefined;
+}
+
 export function codexHome(env = process.env, home = homedir()): string {
   return env.CODEX_HOME?.trim() || join(home, ".codex");
 }
@@ -82,24 +108,21 @@ function petInfoFromJson(
   value: unknown,
   fallback: string,
 ): { id?: string; name: string; description?: string; spritesheetPath: string } {
-  if (!isRecord(value)) return { name: fallback, spritesheetPath: "spritesheet.webp" };
-  const id = typeof value.id === "string" && value.id.trim() ? value.id.trim() : undefined;
+  const fallbackName = sanitizePetDisplayText(fallback) ?? "Unnamed pet";
+  if (!isRecord(value)) return { name: fallbackName, spritesheetPath: "spritesheet.webp" };
+  const id = typeof value.id === "string" ? sanitizePetDisplayText(value.id) : undefined;
   const displayName =
-    typeof value.displayName === "string" && value.displayName.trim()
-      ? value.displayName.trim()
-      : undefined;
+    typeof value.displayName === "string" ? sanitizePetDisplayText(value.displayName) : undefined;
   const name =
     displayName ??
-    (typeof value.name === "string" && value.name.trim() ? value.name.trim() : undefined) ??
+    (typeof value.name === "string" ? sanitizePetDisplayText(value.name) : undefined) ??
     id ??
-    fallback;
+    fallbackName;
   const description =
-    typeof value.description === "string" && value.description.trim()
-      ? value.description.trim()
-      : undefined;
+    typeof value.description === "string" ? sanitizePetDisplayText(value.description) : undefined;
   const spritesheetPath =
-    typeof value.spritesheetPath === "string" && value.spritesheetPath.trim()
-      ? value.spritesheetPath.trim()
+    typeof value.spritesheetPath === "string"
+      ? (sanitizePetAssetPathText(value.spritesheetPath) ?? "spritesheet.webp")
       : "spritesheet.webp";
   return { id, name, description, spritesheetPath };
 }
@@ -109,6 +132,48 @@ function resolvePetAssetPath(petDir: string, path: string): string | undefined {
   const resolved = resolve(resolvedPetDir, path);
   const prefix = resolvedPetDir.endsWith(sep) ? resolvedPetDir : `${resolvedPetDir}${sep}`;
   return resolved === resolvedPetDir || resolved.startsWith(prefix) ? resolved : undefined;
+}
+
+function formatSharpError(error: unknown): string {
+  return (
+    sanitizePetDisplayText(error instanceof Error ? error.message : String(error)) ??
+    "unknown error"
+  );
+}
+
+async function validatePetSpritesheet(
+  petDir: string,
+  spritesheetPath: string,
+): Promise<string | undefined> {
+  const resolvedSpritesheetPath = resolvePetAssetPath(petDir, spritesheetPath);
+  if (!resolvedSpritesheetPath)
+    return `invalid spritesheetPath outside pet folder: ${spritesheetPath}`;
+
+  let fileStat;
+  try {
+    fileStat = await stat(resolvedSpritesheetPath);
+  } catch {
+    return `missing ${spritesheetPath}`;
+  }
+
+  if (!fileStat.isFile()) return `${spritesheetPath} is not a file`;
+
+  try {
+    await access(resolvedSpritesheetPath, constants.R_OK);
+  } catch {
+    return `${spritesheetPath} is not readable`;
+  }
+
+  try {
+    const metadata = await sharp(resolvedSpritesheetPath, { animated: false }).metadata();
+    if (metadata.width !== EXPECTED_ATLAS_WIDTH || metadata.height !== EXPECTED_ATLAS_HEIGHT) {
+      return `invalid atlas dimensions: ${metadata.width ?? "?"}x${metadata.height ?? "?"}; expected ${EXPECTED_ATLAS_WIDTH}x${EXPECTED_ATLAS_HEIGHT}`;
+    }
+  } catch (error) {
+    return `could not read ${spritesheetPath}: ${formatSharpError(error)}`;
+  }
+
+  return undefined;
 }
 
 export async function listCodexPets(home = codexHome()): Promise<CodexPetPackage[]> {
@@ -131,16 +196,7 @@ export async function listCodexPets(home = codexHome()): Promise<CodexPetPackage
       continue;
     }
     const { id, name, description, spritesheetPath } = petInfoFromJson(parsed, entry.name);
-    let hasSpritesheet = false;
-    try {
-      const resolvedSpritesheetPath = resolvePetAssetPath(petDir, spritesheetPath);
-      if (resolvedSpritesheetPath) {
-        await access(resolvedSpritesheetPath);
-        hasSpritesheet = true;
-      }
-    } catch {
-      hasSpritesheet = false;
-    }
+    const spritesheetIssue = await validatePetSpritesheet(petDir, spritesheetPath);
     pets.push({
       slug: entry.name,
       id,
@@ -148,7 +204,8 @@ export async function listCodexPets(home = codexHome()): Promise<CodexPetPackage
       description,
       dir: petDir,
       spritesheetPath,
-      hasSpritesheet,
+      hasSpritesheet: spritesheetIssue === undefined,
+      spritesheetIssue,
     });
   }
   return pets.sort((a, b) => a.name.localeCompare(b.name));
@@ -222,7 +279,7 @@ export function describeCodexPetSelectionIssue(
         short: `Pet "${matchingPet.name}" is not ready.`,
         message: [
           `Pet "${matchingPet.name}" (${matchingPet.slug}) exists but is not ready.`,
-          `Missing or unreadable file: ${matchingPet.spritesheetPath}`,
+          `Problem: ${matchingPet.spritesheetIssue ?? `missing ${matchingPet.spritesheetPath}`}`,
           "",
           "Run /pets list for diagnostics, then fix the pet folder:",
           `  ${matchingPet.dir}/`,
@@ -266,7 +323,7 @@ export function formatNoReadyCodexPetsMessage(pets: CodexPetPackage[], home = co
   return [
     "Found custom Codex pets, but none are ready.",
     "",
-    "A ready pet needs both pet.json and spritesheet.webp in its pet folder.",
+    `A ready pet needs pet.json and a readable ${EXPECTED_ATLAS_WIDTH}x${EXPECTED_ATLAS_HEIGHT} spritesheet.webp atlas in its pet folder.`,
     "Run /pets list to see what needs fixing, or create a new pet:",
     "",
     formatCodexPetSetupInstructions(home),
@@ -292,12 +349,9 @@ export async function loadCodexPet(
     throw new Error(`Invalid spritesheetPath outside pet folder: ${pet.spritesheetPath}`);
   const source = sharp(spritesheetPath, { animated: false });
   const metadata = await source.metadata();
-  if (
-    metadata.width !== DEFAULT_CELL_WIDTH * PET_COLUMNS ||
-    metadata.height !== DEFAULT_CELL_HEIGHT * PET_ROWS
-  ) {
+  if (metadata.width !== EXPECTED_ATLAS_WIDTH || metadata.height !== EXPECTED_ATLAS_HEIGHT) {
     throw new Error(
-      `Invalid Codex pet atlas dimensions: ${metadata.width ?? "?"}x${metadata.height ?? "?"}; expected ${DEFAULT_CELL_WIDTH * PET_COLUMNS}x${DEFAULT_CELL_HEIGHT * PET_ROWS}.`,
+      `Invalid Codex pet atlas dimensions: ${metadata.width ?? "?"}x${metadata.height ?? "?"}; expected ${EXPECTED_ATLAS_WIDTH}x${EXPECTED_ATLAS_HEIGHT}.`,
     );
   }
   const cellWidth = DEFAULT_CELL_WIDTH;
@@ -627,7 +681,7 @@ const PET_SUBCOMMANDS: AutocompleteItem[] = [
 ];
 
 function petCompletionValue(subcommand: string, pet: CodexPetPackage): string {
-  return `${subcommand} ${pet.name}`;
+  return `${subcommand} ${pet.slug}`;
 }
 
 export async function openAIPetsArgumentCompletions(
@@ -672,7 +726,9 @@ export function formatCodexPetsListMessage(pets: CodexPetPackage[], home = codex
 
   const petLines = pets
     .map((pet) => {
-      const status = pet.hasSpritesheet ? "ready" : `missing ${pet.spritesheetPath}`;
+      const status = pet.hasSpritesheet
+        ? "ready"
+        : (pet.spritesheetIssue ?? `missing ${pet.spritesheetPath}`);
       return `${pet.name} (${pet.slug}) — ${status}${pet.description ? `\n  ${pet.description}` : ""}`;
     })
     .join("\n");

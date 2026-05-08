@@ -206,7 +206,10 @@ function formatPetSelectPrompt(
     lines.push(
       "",
       "Not ready:",
-      ...brokenPets.map((pet) => `- ${pet.slug} (${pet.name}) — missing ${pet.spritesheetPath}`),
+      ...brokenPets.map(
+        (pet) =>
+          `- ${pet.slug} (${pet.name}) — ${pet.spritesheetIssue ?? `missing ${pet.spritesheetPath}`}`,
+      ),
     );
   }
   return { message: lines.join("\n"), level: "info" };

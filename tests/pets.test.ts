@@ -44,6 +44,20 @@ function firstKittyImageId(value: string): number | undefined {
   return imageId ? Number(imageId) : undefined;
 }
 
+async function writeValidSpritesheet(path: string): Promise<void> {
+  const sheet = await sharp({
+    create: {
+      width: 1536,
+      height: 1872,
+      channels: 4,
+      background: { r: 255, g: 0, b: 0, alpha: 1 },
+    },
+  })
+    .webp()
+    .toBuffer();
+  writeFileSync(path, sheet);
+}
+
 describe("Codex pets helpers", () => {
   test("resolves Codex home and pets directory", () => {
     expect(codexHome({ CODEX_HOME: "/tmp/codex" }, "/home/user")).toBe("/tmp/codex");
@@ -66,7 +80,7 @@ describe("Codex pets helpers", () => {
           spritesheetPath: "spritesheet.webp",
         }),
       );
-      writeFileSync(join(petDir, "spritesheet.webp"), "webp");
+      await writeValidSpritesheet(join(petDir, "spritesheet.webp"));
 
       mkdirSync(join(petsDir, "broken"), { recursive: true });
       writeFileSync(join(petsDir, "broken", "spritesheet.webp"), "webp");
@@ -113,7 +127,11 @@ describe("Codex pets helpers", () => {
 
       const pets = await listCodexPets(tempDir);
       expect(pets).toHaveLength(1);
-      expect(pets[0]).toMatchObject({ slug: "ghost", hasSpritesheet: false });
+      expect(pets[0]).toMatchObject({
+        slug: "ghost",
+        hasSpritesheet: false,
+        spritesheetIssue: "missing spritesheet.webp",
+      });
       expect(formatCodexPetsListMessage(pets, tempDir)).toContain(
         "Ghost (ghost) — missing spritesheet.webp",
       );
@@ -121,9 +139,81 @@ describe("Codex pets helpers", () => {
       const issue = describeCodexPetSelectionIssue(pets, "ghost", tempDir);
       expect(issue.short).toBe('Pet "Ghost" is not ready.');
       expect(issue.message).toContain("exists but is not ready");
+      expect(issue.message).toContain("Problem: missing spritesheet.webp");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+
+  test("rejects non-file or invalid spritesheets as not ready", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "pi-better-openai-pets-invalid-"));
+    try {
+      const dirSheetPet = join(tempDir, "pets", "dir-sheet");
+      mkdirSync(join(dirSheetPet, "spritesheet.webp"), { recursive: true });
+      writeFileSync(join(dirSheetPet, "pet.json"), JSON.stringify({ name: "Dir Sheet" }));
+
+      const garbagePet = join(tempDir, "pets", "garbage");
+      mkdirSync(garbagePet, { recursive: true });
+      writeFileSync(join(garbagePet, "pet.json"), JSON.stringify({ name: "Garbage" }));
+      writeFileSync(join(garbagePet, "spritesheet.webp"), "not a webp");
+
+      const wrongSizePet = join(tempDir, "pets", "wrong-size");
+      mkdirSync(wrongSizePet, { recursive: true });
+      writeFileSync(join(wrongSizePet, "pet.json"), JSON.stringify({ name: "Wrong Size" }));
+      const wrongSizeSheet = await sharp({
+        create: {
+          width: 1,
+          height: 1,
+          channels: 4,
+          background: { r: 0, g: 0, b: 255, alpha: 1 },
+        },
+      })
+        .webp()
+        .toBuffer();
+      writeFileSync(join(wrongSizePet, "spritesheet.webp"), wrongSizeSheet);
+
+      const pets = await listCodexPets(tempDir);
+      expect(pets.find((pet) => pet.slug === "dir-sheet")).toMatchObject({
+        hasSpritesheet: false,
+        spritesheetIssue: "spritesheet.webp is not a file",
+      });
+      expect(pets.find((pet) => pet.slug === "garbage")?.hasSpritesheet).toBe(false);
+      expect(pets.find((pet) => pet.slug === "garbage")?.spritesheetIssue).toContain(
+        "could not read spritesheet.webp",
+      );
+      expect(pets.find((pet) => pet.slug === "wrong-size")).toMatchObject({
+        hasSpritesheet: false,
+        spritesheetIssue: "invalid atlas dimensions: 1x1; expected 1536x1872",
+      });
+      const message = formatCodexPetsListMessage(pets, tempDir);
+      expect(message).toContain("Dir Sheet (dir-sheet) — spritesheet.webp is not a file");
+      expect(message).toContain("Garbage (garbage) — could not read spritesheet.webp");
+      expect(message).toContain(
+        "Wrong Size (wrong-size) — invalid atlas dimensions: 1x1; expected 1536x1872",
+      );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("sanitizes pet metadata before display", () => {
+    const info = _test.petsTest.petInfoFromJson(
+      {
+        id: "stacky\x1b[31m",
+        displayName: "Stacky\x1b]0;bad\x07\nPlus",
+        description: "Line One\r\n\x1b[31mLine Two\x1b[0m",
+        spritesheetPath: "spritesheet.webp\x1b[31m",
+      },
+      "fallback",
+    );
+
+    expect(info).toEqual({
+      id: "stacky",
+      name: "Stacky Plus",
+      description: "Line One Line Two",
+      spritesheetPath: "spritesheet.webp",
+    });
+    expect(JSON.stringify(info)).not.toContain("\x1b");
   });
 
   test("explains requested pet slugs that do not match a ready pet", () => {
@@ -385,21 +475,21 @@ describe("Codex pets helpers", () => {
           description: "Cyber wolf",
         }),
       );
-      writeFileSync(join(petDir, "spritesheet.webp"), "webp");
+      await writeValidSpritesheet(join(petDir, "spritesheet.webp"));
 
       expect(await openAIPetsArgumentCompletions("w", tempDir)).toEqual([
         { value: "wake", label: "wake", description: "Render a footer pet" },
       ]);
       expect(await openAIPetsArgumentCompletions("wake M", tempDir)).toEqual([
         {
-          value: "wake MetalGarurumon",
+          value: "wake metalgarurumon",
           label: "MetalGarurumon",
           description: "metalgarurumon — Cyber wolf",
         },
       ]);
       expect(await openAIPetsArgumentCompletions("select metal", tempDir)).toEqual([
         {
-          value: "select MetalGarurumon",
+          value: "select metalgarurumon",
           label: "MetalGarurumon",
           description: "metalgarurumon — Cyber wolf",
         },
