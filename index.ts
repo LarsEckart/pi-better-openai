@@ -1049,6 +1049,8 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     let selectedIndex = 0;
     let searchQuery = "";
     let closed = false;
+    let submenuComponent: ReturnType<NonNullable<SettingsPickerItem["submenu"]>> | undefined;
+    let submenuItemIndex: number | undefined;
 
     function currentItems(): SettingsPickerItem[] {
       const allItems = items();
@@ -1070,6 +1072,13 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       done();
     }
 
+    function closeNestedSubmenu(): void {
+      submenuComponent = undefined;
+      if (submenuItemIndex !== undefined) selectedIndex = submenuItemIndex;
+      submenuItemIndex = undefined;
+      options?.onSelection?.(selectedItem());
+    }
+
     function cycleSelected(direction: 1 | -1 = 1): void {
       const item = selectedItem();
       if (!item?.values?.length) return;
@@ -1082,8 +1091,23 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       options?.onSelection?.(selectedItem());
     }
 
+    function activateSelected(): void {
+      const item = selectedItem();
+      if (!item) return;
+      if (item.submenu) {
+        submenuItemIndex = selectedIndex;
+        submenuComponent = item.submenu(item.currentValue, (selectedValue?: string) => {
+          if (selectedValue !== undefined) writeSetting(ctx, item.id, selectedValue);
+          closeNestedSubmenu();
+        });
+        return;
+      }
+      cycleSelected(1);
+    }
+
     return {
       render(width: number) {
+        if (submenuComponent) return submenuComponent.render(width);
         const current = currentItems();
         const selected = selectedItem();
         if (!closed) options?.onSelection?.(selected);
@@ -1141,8 +1165,14 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
         );
         return lines;
       },
-      invalidate() {},
+      invalidate() {
+        submenuComponent?.invalidate();
+      },
       handleInput(data: string) {
+        if (submenuComponent) {
+          submenuComponent.handleInput?.(data);
+          return;
+        }
         const current = currentItems();
         if (current.length === 0) {
           if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) close();
@@ -1160,7 +1190,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
           matchesKey(data, Key.space) ||
           data === " "
         )
-          cycleSelected(1);
+          activateSelected();
         else if (matchesKey(data, Key.left)) cycleSelected(-1);
         else if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) close();
         else if (matchesKey(data, Key.backspace)) {
@@ -1175,7 +1205,35 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     };
   }
 
-  function buildSettingsItems(ctx: ExtensionContext, cfg: ResolvedConfig): SettingsPickerItem[] {
+  function fastSettingsSummary(ctx: ExtensionContext, cfg: ResolvedConfig): string {
+    if (active) return "on";
+    if (desiredActive)
+      return supportsFast(ctx, cfg.supportedModels) ? "requested" : "requested inactive";
+    return "off";
+  }
+
+  function usageSettingsSummary(cfg: ResolvedConfig): string {
+    return cfg.usage.enabled
+      ? `enabled · ${Math.round(cfg.usage.refreshIntervalMs / 1000)}s`
+      : "disabled";
+  }
+
+  function imageSettingsSummary(cfg: ResolvedConfig): string {
+    return cfg.image.enabled
+      ? `enabled · ${cfg.image.defaultModel} · ${cfg.image.defaultSave}/${cfg.image.outputFormat}`
+      : "disabled";
+  }
+
+  function petSettingsSummary(cfg: ResolvedConfig): string {
+    const selected = cfg.pets.slug || (cfg.pets.enabled ? "first ready" : PET_EMPTY_VALUE);
+    const status = cfg.pets.enabled ? "enabled" : "disabled";
+    return `${status} · ${selected} · ${cfg.pets.placement}`;
+  }
+
+  function buildFastSettingsItems(
+    ctx: ExtensionContext,
+    cfg: ResolvedConfig,
+  ): SettingsPickerItem[] {
     return [
       {
         id: "fast.enabled",
@@ -1191,6 +1249,11 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
         values: ["true", "false"],
         description: "Remember fast-mode state across sessions.",
       },
+    ];
+  }
+
+  function buildFooterSettingsItems(cfg: ResolvedConfig): SettingsPickerItem[] {
+    return [
       {
         id: "footer.mode",
         label: "Footer mode",
@@ -1199,36 +1262,11 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
         description:
           "replace = custom footer, status = pi footer plus status line, off = no Better OpenAI footer/status unless Footer pet is enabled.",
       },
-      {
-        id: "pets.menu",
-        label: "Footer pet",
-        currentValue: "configure",
-        description: "Configure footer pet visibility, animation-state mapping, and size.",
-        submenu: (_value, done) => {
-          setPetSettingsPreviewActive(ctx, true);
-          return settingsSubmenu(
-            "Footer pet settings",
-            () => buildPetSettingsItems(config(ctx)),
-            ctx,
-            () => done(),
-            {
-              onSelection: (item) => {
-                const previewState = petPreviewFromItem(item);
-                if (previewState !== petPreviewState) {
-                  petPreviewState = previewState;
-                  updateFooter(ctx);
-                }
-              },
-              onClose: () => {
-                petPreviewState = undefined;
-                setPetSettingsPreviewActive(ctx, false);
-                updateFooter(ctx);
-              },
-              renderExtra: (width) => renderPetSettingsPreview(ctx, width),
-            },
-          );
-        },
-      },
+    ];
+  }
+
+  function buildUsageSettingsItems(cfg: ResolvedConfig): SettingsPickerItem[] {
+    return [
       {
         id: "usage.enabled",
         label: "Usage display",
@@ -1257,6 +1295,11 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
         values: ["true", "false"],
         description: "Include compact reset countdowns and local reset times.",
       },
+    ];
+  }
+
+  function buildImageSettingsItems(cfg: ResolvedConfig): SettingsPickerItem[] {
+    return [
       {
         id: "image.enabled",
         label: "Image tool",
@@ -1293,6 +1336,14 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
         values: ["30000", "60000", "120000", "180000", "300000"],
         description: "Image request timeout in milliseconds.",
       },
+    ];
+  }
+
+  function buildDiagnosticsSettingsItems(
+    ctx: ExtensionContext,
+    cfg: ResolvedConfig,
+  ): SettingsPickerItem[] {
+    return [
       {
         id: "debug",
         label: "Debug info",
@@ -1317,6 +1368,106 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
             "Config",
             JSON.stringify(readRawConfig(cfg.configPath), null, 2).split("\n"),
             () => done(),
+          ),
+      },
+    ];
+  }
+
+  function buildSettingsSections(ctx: ExtensionContext, cfg: ResolvedConfig): SettingsPickerItem[] {
+    return [
+      {
+        id: "section.fast",
+        label: "Fast mode",
+        currentValue: fastSettingsSummary(ctx, cfg),
+        description: "Configure OpenAI fast mode and persistence.",
+        submenu: (_value, done) =>
+          settingsSubmenu(
+            "Fast mode settings",
+            () => buildFastSettingsItems(ctx, config(ctx)),
+            ctx,
+            () => done(fastSettingsSummary(ctx, config(ctx))),
+          ),
+      },
+      {
+        id: "section.footer",
+        label: "Footer",
+        currentValue: cfg.footer.mode,
+        description: "Configure Better OpenAI footer ownership.",
+        submenu: (_value, done) =>
+          settingsSubmenu(
+            "Footer settings",
+            () => buildFooterSettingsItems(config(ctx)),
+            ctx,
+            () => done(config(ctx).footer.mode),
+          ),
+      },
+      {
+        id: "section.usage",
+        label: "Usage",
+        currentValue: usageSettingsSummary(cfg),
+        description: "Configure subscription usage fetching and display.",
+        submenu: (_value, done) =>
+          settingsSubmenu(
+            "Usage settings",
+            () => buildUsageSettingsItems(config(ctx)),
+            ctx,
+            () => done(usageSettingsSummary(config(ctx))),
+          ),
+      },
+      {
+        id: "section.image",
+        label: "Image tool",
+        currentValue: imageSettingsSummary(cfg),
+        description: "Configure OpenAI image generation defaults.",
+        submenu: (_value, done) =>
+          settingsSubmenu(
+            "Image tool settings",
+            () => buildImageSettingsItems(config(ctx)),
+            ctx,
+            () => done(imageSettingsSummary(config(ctx))),
+          ),
+      },
+      {
+        id: "section.pets",
+        label: "Footer pet",
+        currentValue: petSettingsSummary(cfg),
+        description: "Configure footer pet visibility, animation-state mapping, and size.",
+        submenu: (_value, done) => {
+          setPetSettingsPreviewActive(ctx, true);
+          return settingsSubmenu(
+            "Footer pet settings",
+            () => buildPetSettingsItems(config(ctx)),
+            ctx,
+            () => done(petSettingsSummary(config(ctx))),
+            {
+              onSelection: (item) => {
+                const previewState = petPreviewFromItem(item);
+                if (previewState !== petPreviewState) {
+                  petPreviewState = previewState;
+                  updateFooter(ctx);
+                }
+              },
+              onClose: () => {
+                petPreviewState = undefined;
+                setPetSettingsPreviewActive(ctx, false);
+                updateFooter(ctx);
+              },
+              renderExtra: (width) => renderPetSettingsPreview(ctx, width),
+            },
+          );
+        },
+      },
+      {
+        id: "section.diagnostics",
+        label: "Diagnostics",
+        currentValue: "debug / config",
+        description: "Show Better OpenAI diagnostics and raw config details.",
+        submenu: (_value, done) =>
+          settingsSubmenu(
+            "Diagnostics",
+            () => buildDiagnosticsSettingsItems(ctx, config(ctx)),
+            ctx,
+            () => done("debug / config"),
           ),
       },
     ];
@@ -1414,15 +1565,15 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
           })(),
         );
         const settingsList = new SettingsList(
-          buildSettingsItems(ctx, refresh(ctx)),
-          13,
+          buildSettingsSections(ctx, refresh(ctx)),
+          8,
           getSettingsListTheme(),
           (id, newValue) => {
-            writeSetting(ctx, id, newValue);
+            if (!id.startsWith("section.")) writeSetting(ctx, id, newValue);
             settingsList.updateValue(
               id,
-              buildSettingsItems(ctx, config(ctx)).find((item) => item.id === id)?.currentValue ??
-                newValue,
+              buildSettingsSections(ctx, config(ctx)).find((item) => item.id === id)
+                ?.currentValue ?? newValue,
             );
             tui.requestRender();
           },
