@@ -402,7 +402,84 @@ describe("Codex pets helpers", () => {
     ).join("");
     expect(secondRender).toContain(deleteCodexPetKittyPlacement(42));
     expect(firstKittyImageId(secondRender)).not.toBe(42);
-    expect(secondRender).not.toContain("a=t");
+    expect(secondRender).toContain("a=t");
+  });
+
+  test("reuploads Kitty frames when animation loops back to a prior frame", () => {
+    setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+    const frames: PetFrame[] = [
+      {
+        rawRgbaData: Buffer.from([0, 0, 0, 255]).toString("base64"),
+        kittyImageId: 101,
+        mimeType: "image/png",
+        durationMs: 100,
+        widthPx: 1,
+        heightPx: 1,
+      },
+      {
+        rawRgbaData: Buffer.from([255, 0, 0, 255]).toString("base64"),
+        kittyImageId: 102,
+        mimeType: "image/png",
+        durationMs: 100,
+        widthPx: 1,
+        heightPx: 1,
+      },
+    ];
+    const loaded = {
+      pet: {
+        slug: "kitty-loop",
+        name: "Kitty Loop",
+        dir: "/tmp",
+        spritesheetPath: "spritesheet.webp",
+        hasSpritesheet: true,
+      },
+      states: { idle: frames } as LoadedCodexPet["states"],
+    } satisfies LoadedCodexPet;
+    const manager = new CodexPetKittyManager(10);
+
+    const first = renderCodexPetFrame(
+      loaded,
+      "idle",
+      8,
+      { fg: (_color, value) => value },
+      {
+        sizeCells: 4,
+        imageId: 10,
+        now: 0,
+        kittyManager: manager,
+      },
+    ).join("");
+    const second = renderCodexPetFrame(
+      loaded,
+      "idle",
+      8,
+      { fg: (_color, value) => value },
+      {
+        sizeCells: 4,
+        imageId: 10,
+        now: 100,
+        kittyManager: manager,
+      },
+    ).join("");
+    const looped = renderCodexPetFrame(
+      loaded,
+      "idle",
+      8,
+      { fg: (_color, value) => value },
+      {
+        sizeCells: 4,
+        imageId: 10,
+        now: 200,
+        kittyManager: manager,
+      },
+    ).join("");
+
+    expect(first).toContain("i=101");
+    expect(first).toContain("a=t");
+    expect(second).toContain("i=102");
+    expect(second).toContain("a=t");
+    expect(looped).toContain("i=101");
+    expect(looped).toContain("a=t");
   });
 
   test("centralizes Kitty frame upload and cleanup lifecycle", () => {
@@ -444,7 +521,7 @@ describe("Codex pets helpers", () => {
       { fg: (_color, value) => value },
       { sizeCells: 4, imageId: 9, now: 0, kittyManager: manager },
     ).join("");
-    expect(secondRender).not.toContain("a=t");
+    expect(secondRender).toContain("a=t");
 
     manager.invalidate(loaded);
     const cleanup = manager.takeCleanupSequence();

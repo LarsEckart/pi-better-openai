@@ -514,7 +514,6 @@ function encodeKittyRawRgba(frame: PetFrame, imageId: number): string {
 
 export class CodexPetKittyManager {
   private previousFrameImageId: number | undefined;
-  private readonly uploadedFrameImageIds = new Set<number>();
   private readonly pendingCleanupImageIds = new Set<number>();
 
   constructor(readonly placementImageId: number) {}
@@ -526,7 +525,6 @@ export class CodexPetKittyManager {
   invalidate(pet?: LoadedCodexPet): void {
     this.queueCleanup(pet);
     this.previousFrameImageId = undefined;
-    this.uploadedFrameImageIds.clear();
     markCodexPetKittyFramesUnuploaded(pet);
   }
 
@@ -563,10 +561,12 @@ export class CodexPetKittyManager {
         ? deleteCodexPetKittyPlacement(this.previousFrameImageId)
         : "";
     const deleteCurrent = deleteCodexPetKittyPlacement(frameImageId);
-    const upload = this.uploadedFrameImageIds.has(frameImageId)
-      ? ""
-      : encodeKittyRawRgba(frame, frameImageId);
-    this.uploadedFrameImageIds.add(frameImageId);
+    // Do not cache uploads across animation loops. Kitty-compatible terminals may
+    // drop image data after clears, quota pressure, or after a placement is
+    // deleted; failures are suppressed with q=2 and otherwise show up as an
+    // occasionally invisible pet. The TUI diff still avoids writing this payload
+    // again when the rendered line is unchanged.
+    const upload = encodeKittyRawRgba(frame, frameImageId);
     frame.kittyUploaded = true;
     this.previousFrameImageId = frameImageId;
     // Recent pi-tui versions automatically free Kitty image IDs they own on changed lines.
