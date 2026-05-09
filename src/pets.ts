@@ -21,6 +21,7 @@ const PET_COLUMNS = 8;
 const PET_ROWS = 9;
 const DEFAULT_CELL_WIDTH = 192;
 const DEFAULT_CELL_HEIGHT = 208;
+const DEFAULT_SPRITESHEET_PATH = "spritesheet.webp";
 const EXPECTED_ATLAS_WIDTH = DEFAULT_CELL_WIDTH * PET_COLUMNS;
 const EXPECTED_ATLAS_HEIGHT = DEFAULT_CELL_HEIGHT * PET_ROWS;
 
@@ -96,6 +97,14 @@ function sanitizePetAssetPathText(value: string): string | undefined {
   return sanitized || undefined;
 }
 
+function sanitizePetDisplayField(value: unknown): string | undefined {
+  return typeof value === "string" ? sanitizePetDisplayText(value) : undefined;
+}
+
+function sanitizePetAssetPathField(value: unknown): string | undefined {
+  return typeof value === "string" ? sanitizePetAssetPathText(value) : undefined;
+}
+
 export function codexHome(env = process.env, home = homedir()): string {
   return env.CODEX_HOME?.trim() || join(home, ".codex");
 }
@@ -109,21 +118,17 @@ function petInfoFromJson(
   fallback: string,
 ): { id?: string; name: string; description?: string; spritesheetPath: string } {
   const fallbackName = sanitizePetDisplayText(fallback) ?? "Unnamed pet";
-  if (!isRecord(value)) return { name: fallbackName, spritesheetPath: "spritesheet.webp" };
-  const id = typeof value.id === "string" ? sanitizePetDisplayText(value.id) : undefined;
-  const displayName =
-    typeof value.displayName === "string" ? sanitizePetDisplayText(value.displayName) : undefined;
+  if (!isRecord(value)) return { name: fallbackName, spritesheetPath: DEFAULT_SPRITESHEET_PATH };
+
+  const id = sanitizePetDisplayField(value.id);
   const name =
-    displayName ??
-    (typeof value.name === "string" ? sanitizePetDisplayText(value.name) : undefined) ??
+    sanitizePetDisplayField(value.displayName) ??
+    sanitizePetDisplayField(value.name) ??
     id ??
     fallbackName;
-  const description =
-    typeof value.description === "string" ? sanitizePetDisplayText(value.description) : undefined;
+  const description = sanitizePetDisplayField(value.description);
   const spritesheetPath =
-    typeof value.spritesheetPath === "string"
-      ? (sanitizePetAssetPathText(value.spritesheetPath) ?? "spritesheet.webp")
-      : "spritesheet.webp";
+    sanitizePetAssetPathField(value.spritesheetPath) ?? DEFAULT_SPRITESHEET_PATH;
   return { id, name, description, spritesheetPath };
 }
 
@@ -224,8 +229,10 @@ function petMatchesLookup(pet: CodexPetPackage, requested: string): boolean {
 }
 
 export function findCodexPet(pets: CodexPetPackage[], value?: string): CodexPetPackage | undefined {
-  const requested = value?.trim() ? petLookupKey(value.trim()) : "";
-  if (!requested) return undefined;
+  const requestedText = value?.trim();
+  if (!requestedText) return undefined;
+
+  const requested = petLookupKey(requestedText);
   return pets.find((pet) => petMatchesLookup(pet, requested));
 }
 
@@ -233,10 +240,11 @@ export function findReadyCodexPet(
   pets: CodexPetPackage[],
   value?: string,
 ): CodexPetPackage | undefined {
-  const ready = pets.filter((pet) => pet.hasSpritesheet);
-  if (!value?.trim()) return ready[0];
-  const requested = petLookupKey(value.trim());
-  return ready.find((pet) => petMatchesLookup(pet, requested));
+  const requestedText = value?.trim();
+  if (!requestedText) return pets.find((pet) => pet.hasSpritesheet);
+
+  const requested = petLookupKey(requestedText);
+  return pets.find((pet) => pet.hasSpritesheet && petMatchesLookup(pet, requested));
 }
 
 function selectPet(pets: CodexPetPackage[], slug?: string): CodexPetPackage | undefined {
@@ -255,7 +263,7 @@ export function formatCodexPetSetupInstructions(home = codexHome()): string {
     "",
     "Expected files:",
     "  pet.json",
-    "  spritesheet.webp",
+    `  ${DEFAULT_SPRITESHEET_PATH}`,
     "",
     "Create one:",
     "  $skill-installer hatch-pet",
@@ -323,7 +331,7 @@ export function formatNoReadyCodexPetsMessage(pets: CodexPetPackage[], home = co
   return [
     "Found custom Codex pets, but none are ready.",
     "",
-    `A ready pet needs pet.json and a readable ${EXPECTED_ATLAS_WIDTH}x${EXPECTED_ATLAS_HEIGHT} spritesheet.webp atlas in its pet folder.`,
+    `A ready pet needs pet.json and a readable ${EXPECTED_ATLAS_WIDTH}x${EXPECTED_ATLAS_HEIGHT} ${DEFAULT_SPRITESHEET_PATH} atlas in its pet folder.`,
     "Run /pets list to see what needs fixing, or create a new pet:",
     "",
     formatCodexPetSetupInstructions(home),
@@ -354,8 +362,6 @@ export async function loadCodexPet(
       `Invalid Codex pet atlas dimensions: ${metadata.width ?? "?"}x${metadata.height ?? "?"}; expected ${EXPECTED_ATLAS_WIDTH}x${EXPECTED_ATLAS_HEIGHT}.`,
     );
   }
-  const cellWidth = DEFAULT_CELL_WIDTH;
-  const cellHeight = DEFAULT_CELL_HEIGHT;
   const states = {} as Record<PetState, PetFrame[]>;
   const imageProtocol = getCapabilities().images;
   const useKitty = imageProtocol === "kitty";
@@ -368,10 +374,13 @@ export async function loadCodexPet(
   const targetHeightPx = targetWidthPx
     ? Math.max(
         1,
-        Math.ceil((cellHeight * targetWidthPx) / cellWidth / cellDimensions.heightPx) *
-          cellDimensions.heightPx,
+        Math.ceil(
+          (DEFAULT_CELL_HEIGHT * targetWidthPx) / DEFAULT_CELL_WIDTH / cellDimensions.heightPx,
+        ) * cellDimensions.heightPx,
       )
     : undefined;
+  const outputWidthPx = targetWidthPx ?? DEFAULT_CELL_WIDTH;
+  const outputHeightPx = targetHeightPx ?? DEFAULT_CELL_HEIGHT;
 
   for (const [state, animation] of Object.entries(PET_ANIMATION_ROWS) as Array<
     [PetState, (typeof PET_ANIMATION_ROWS)[PetState]]
@@ -379,23 +388,21 @@ export async function loadCodexPet(
     states[state] = [];
     for (let column = 0; column < animation.durations.length; column++) {
       const durationMs = animation.durations[column] ?? 150;
-      const frameWidthPx = targetWidthPx ?? cellWidth;
-      const frameHeightPx = targetHeightPx ?? cellHeight;
       if (!imageProtocol) {
         states[state].push({
           mimeType: "image/png",
           durationMs,
-          widthPx: frameWidthPx,
-          heightPx: frameHeightPx,
+          widthPx: outputWidthPx,
+          heightPx: outputHeightPx,
         });
         continue;
       }
 
       let frame = source.clone().extract({
-        left: column * cellWidth,
-        top: animation.row * cellHeight,
-        width: cellWidth,
-        height: cellHeight,
+        left: column * DEFAULT_CELL_WIDTH,
+        top: animation.row * DEFAULT_CELL_HEIGHT,
+        width: DEFAULT_CELL_WIDTH,
+        height: DEFAULT_CELL_HEIGHT,
       });
       if (targetWidthPx && targetHeightPx) {
         frame = frame.resize(targetWidthPx, targetHeightPx, {
@@ -411,8 +418,8 @@ export async function loadCodexPet(
         kittyImageId: useKitty ? kittyImageBase + kittyFrameOffset++ : undefined,
         mimeType: "image/png",
         durationMs,
-        widthPx: frameWidthPx,
-        heightPx: frameHeightPx,
+        widthPx: outputWidthPx,
+        heightPx: outputHeightPx,
       });
     }
   }
@@ -452,24 +459,30 @@ export function nextAnimationFrameDelayMs(
     if (cursor < duration) return Math.max(1, Math.ceil(duration - cursor));
     cursor -= duration;
   }
-  return Math.max(1, Math.ceil(frames[0]?.durationMs ?? 120));
+  return Math.max(1, Math.ceil(frames[0].durationMs));
+}
+
+function forEachCodexPetFrame(
+  pet: LoadedCodexPet | undefined,
+  visit: (frame: PetFrame) => void,
+): void {
+  if (!pet) return;
+  for (const frames of Object.values(pet.states)) {
+    for (const frame of frames) visit(frame);
+  }
 }
 
 function markCodexPetKittyFramesUnuploaded(pet?: LoadedCodexPet): void {
-  if (!pet) return;
-  for (const frames of Object.values(pet.states)) {
-    for (const frame of frames) frame.kittyUploaded = false;
-  }
+  forEachCodexPetFrame(pet, (frame) => {
+    frame.kittyUploaded = false;
+  });
 }
 
 function codexPetKittyImageIds(pet?: LoadedCodexPet): number[] {
-  if (!pet) return [];
   const imageIds = new Set<number>();
-  for (const frames of Object.values(pet.states)) {
-    for (const frame of frames) {
-      if (frame.kittyImageId !== undefined) imageIds.add(frame.kittyImageId);
-    }
-  }
+  forEachCodexPetFrame(pet, (frame) => {
+    if (frame.kittyImageId !== undefined) imageIds.add(frame.kittyImageId);
+  });
   return Array.from(imageIds);
 }
 
@@ -496,18 +509,18 @@ function encodeKittyRawRgba(frame: PetFrame, imageId: number): string {
     `v=${frame.heightPx}`,
     `i=${imageId}`,
     "q=2",
-  ];
+  ].join(",");
   if (rawRgbaData.length <= chunkSize) {
-    return `\x1b_G${params.join(",")};${rawRgbaData}\x1b\\`;
+    return `\x1b_G${params};${rawRgbaData}\x1b\\`;
   }
 
   const chunks: string[] = [];
   for (let offset = 0; offset < rawRgbaData.length; offset += chunkSize) {
     const chunk = rawRgbaData.slice(offset, offset + chunkSize);
-    const first = offset === 0;
-    const last = offset + chunkSize >= rawRgbaData.length;
-    if (first) chunks.push(`\x1b_G${params.join(",")},m=1;${chunk}\x1b\\`);
-    else chunks.push(`\x1b_Gm=${last ? 0 : 1};${chunk}\x1b\\`);
+    const isFirstChunk = offset === 0;
+    const isLastChunk = offset + chunkSize >= rawRgbaData.length;
+    if (isFirstChunk) chunks.push(`\x1b_G${params},m=1;${chunk}\x1b\\`);
+    else chunks.push(`\x1b_Gm=${isLastChunk ? 0 : 1};${chunk}\x1b\\`);
   }
   return chunks.join("");
 }
@@ -549,7 +562,7 @@ export class CodexPetKittyManager {
   }
 
   renderFrame(frame: PetFrame, width: number, options: { sizeCells: number }): string[] {
-    const columns = Math.max(1, Math.min(Math.max(1, width - 2), options.sizeCells));
+    const columns = Math.max(1, Math.min(width - 2, options.sizeCells));
     const rows = calculateImageRows(
       { widthPx: frame.widthPx, heightPx: frame.heightPx },
       columns,
@@ -624,13 +637,8 @@ export function renderCodexPetFrame(
   if (!frame) return [];
   const imageProtocol = getCapabilities().images;
   if (imageProtocol === "kitty") {
-    return (options.kittyManager ?? defaultKittyManager(options.imageId)).renderFrame(
-      frame,
-      width,
-      {
-        sizeCells: options.sizeCells,
-      },
-    );
+    const manager = options.kittyManager ?? defaultKittyManager(options.imageId);
+    return manager.renderFrame(frame, width, { sizeCells: options.sizeCells });
   }
   if (!imageProtocol) {
     const fallback = imageFallback(frame.mimeType, {
@@ -684,6 +692,15 @@ function petCompletionValue(subcommand: string, pet: CodexPetPackage): string {
   return `${subcommand} ${pet.slug}`;
 }
 
+function petContainsLookup(pet: CodexPetPackage, query: string): boolean {
+  return (
+    !query ||
+    petLookupKey(pet.slug).includes(query) ||
+    (pet.id !== undefined && petLookupKey(pet.id).includes(query)) ||
+    petLookupKey(pet.name).includes(query)
+  );
+}
+
 export async function openAIPetsArgumentCompletions(
   argumentPrefix: string,
   home = codexHome(),
@@ -704,14 +721,7 @@ export async function openAIPetsArgumentCompletions(
   const petQuery = hasTrailingSpace ? "" : parts.slice(1).join(" ");
   const normalizedPetQuery = petLookupKey(petQuery);
   const pets = (await listCodexPets(home)).filter((pet) => pet.hasSpritesheet);
-  const matches = pets.filter((pet) => {
-    if (!normalizedPetQuery) return true;
-    return (
-      petLookupKey(pet.slug).includes(normalizedPetQuery) ||
-      (pet.id !== undefined && petLookupKey(pet.id).includes(normalizedPetQuery)) ||
-      petLookupKey(pet.name).includes(normalizedPetQuery)
-    );
-  });
+  const matches = pets.filter((pet) => petContainsLookup(pet, normalizedPetQuery));
   return matches.length > 0
     ? matches.map((pet) => ({
         value: petCompletionValue(subcommand, pet),
@@ -721,17 +731,20 @@ export async function openAIPetsArgumentCompletions(
     : null;
 }
 
+function codexPetStatus(pet: CodexPetPackage): string {
+  if (pet.hasSpritesheet) return "ready";
+  return pet.spritesheetIssue ?? `missing ${pet.spritesheetPath}`;
+}
+
+function formatCodexPetListLine(pet: CodexPetPackage): string {
+  const description = pet.description ? `\n  ${pet.description}` : "";
+  return `${pet.name} (${pet.slug}) — ${codexPetStatus(pet)}${description}`;
+}
+
 export function formatCodexPetsListMessage(pets: CodexPetPackage[], home = codexHome()): string {
   if (pets.length === 0) return formatNoReadyCodexPetsMessage(pets, home);
 
-  const petLines = pets
-    .map((pet) => {
-      const status = pet.hasSpritesheet
-        ? "ready"
-        : (pet.spritesheetIssue ?? `missing ${pet.spritesheetPath}`);
-      return `${pet.name} (${pet.slug}) — ${status}${pet.description ? `\n  ${pet.description}` : ""}`;
-    })
-    .join("\n");
+  const petLines = pets.map(formatCodexPetListLine).join("\n");
 
   if (pets.some((pet) => pet.hasSpritesheet)) return petLines;
 
@@ -763,25 +776,31 @@ export function registerOpenAIPets(pi: ExtensionAPI, controller: PetsCommandCont
       const [subcommand = "help", ...rest] = args.trim().split(/\s+/).filter(Boolean);
       const normalized = subcommand.toLowerCase();
       const slug = rest.join(" ").trim() || undefined;
-      if (normalized === "help") {
-        ctx.ui.notify(formatCodexPetsHelp(), "info");
-        return;
-      }
-      if (normalized === "list") {
-        await notifyPetsList(ctx);
-        return;
-      }
-      if (normalized === "wake" && controller.wake) {
-        await controller.wake(ctx, slug);
-        return;
-      }
-      if (normalized === "tuck" && controller.tuck) {
-        await controller.tuck(ctx);
-        return;
-      }
-      if (normalized === "select" && controller.select) {
-        await controller.select(ctx, slug);
-        return;
+      switch (normalized) {
+        case "help":
+          ctx.ui.notify(formatCodexPetsHelp(), "info");
+          return;
+        case "list":
+          await notifyPetsList(ctx);
+          return;
+        case "wake":
+          if (controller.wake) {
+            await controller.wake(ctx, slug);
+            return;
+          }
+          break;
+        case "tuck":
+          if (controller.tuck) {
+            await controller.tuck(ctx);
+            return;
+          }
+          break;
+        case "select":
+          if (controller.select) {
+            await controller.select(ctx, slug);
+            return;
+          }
+          break;
       }
       ctx.ui.notify(`Usage: /${PETS_COMMAND} [help|list|wake [slug]|tuck|select <slug>]`, "error");
     },

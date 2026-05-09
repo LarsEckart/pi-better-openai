@@ -7,6 +7,7 @@ import { resetCapabilitiesCache, setCapabilities, visibleWidth } from "@mariozec
 import sharp from "sharp";
 import { _test } from "../index.ts";
 import {
+  type CodexPetPackage,
   type LoadedCodexPet,
   type PetFrame,
   animationFrameAt,
@@ -44,18 +45,77 @@ function firstKittyImageId(value: string): number | undefined {
   return imageId ? Number(imageId) : undefined;
 }
 
-async function writeValidSpritesheet(path: string): Promise<void> {
-  const sheet = await sharp({
+type RgbaColor = { r: number; g: number; b: number; alpha: number };
+
+type SpritesheetOptions = {
+  width?: number;
+  height?: number;
+  background?: RgbaColor;
+};
+
+const DEFAULT_SPRITESHEET_BACKGROUND: RgbaColor = { r: 255, g: 0, b: 0, alpha: 1 };
+
+async function createSpritesheetBuffer({
+  width = 1536,
+  height = 1872,
+  background = DEFAULT_SPRITESHEET_BACKGROUND,
+}: SpritesheetOptions = {}): Promise<Buffer> {
+  return sharp({
     create: {
-      width: 1536,
-      height: 1872,
+      width,
+      height,
       channels: 4,
-      background: { r: 255, g: 0, b: 0, alpha: 1 },
+      background,
     },
   })
     .webp()
     .toBuffer();
-  writeFileSync(path, sheet);
+}
+
+async function writeValidSpritesheet(path: string, background?: RgbaColor): Promise<void> {
+  writeFileSync(path, await createSpritesheetBuffer({ background }));
+}
+
+async function withTempDir<T>(prefix: string, run: (tempDir: string) => Promise<T>): Promise<T> {
+  const tempDir = await mkdtemp(join(tmpdir(), prefix));
+  try {
+    return await run(tempDir);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+function petPackage(
+  slug: string,
+  name: string,
+  overrides: Partial<CodexPetPackage> = {},
+): CodexPetPackage {
+  return {
+    slug,
+    name,
+    dir: `/tmp/${slug}`,
+    spritesheetPath: "spritesheet.webp",
+    hasSpritesheet: true,
+    ...overrides,
+  };
+}
+
+function kittyFrame(kittyImageId: number, rgba = [0, 0, 0, 255]): PetFrame {
+  return {
+    rawRgbaData: Buffer.from(rgba).toString("base64"),
+    kittyImageId,
+    mimeType: "image/png",
+    durationMs: 100,
+    widthPx: 1,
+    heightPx: 1,
+  };
+}
+
+function loadedPetWithIdleFrames(slug: string, name: string, frames: PetFrame[]): LoadedCodexPet {
+  return {
+    pet: petPackage(slug, name),
+    states: { idle: frames } as LoadedCodexPet["states"],
+  };
 }
 
 describe("Codex pets helpers", () => {
@@ -66,8 +126,7 @@ describe("Codex pets helpers", () => {
   });
 
   test("lists valid local custom pets", async () => {
-    const tempDir = await mkdtemp(join(tmpdir(), "pi-better-openai-pets-"));
-    try {
+    await withTempDir("pi-better-openai-pets-", async (tempDir) => {
       const petsDir = join(tempDir, "pets");
       const petDir = join(petsDir, "stacky-plus");
       mkdirSync(petDir, { recursive: true });
@@ -96,14 +155,11 @@ describe("Codex pets helpers", () => {
       });
       expect(_test.petsTest.selectPet(pets, "Stacky Plus")?.slug).toBe("stacky-plus");
       expect(_test.petsTest.selectPet(pets, "STACKY_PLUS")?.slug).toBe("stacky-plus");
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("returns empty lists and actionable setup text when no pets exist", async () => {
-    const tempDir = await mkdtemp(join(tmpdir(), "pi-better-openai-pets-empty-"));
-    try {
+    await withTempDir("pi-better-openai-pets-empty-", async (tempDir) => {
       expect(await listCodexPets(tempDir)).toEqual([]);
       const missingDirMessage = formatNoReadyCodexPetsMessage([], tempDir);
       expect(missingDirMessage).toContain("No custom Codex pets found.");
@@ -113,14 +169,11 @@ describe("Codex pets helpers", () => {
       mkdirSync(join(tempDir, "pets"), { recursive: true });
       expect(await listCodexPets(tempDir)).toEqual([]);
       expect(formatCodexPetsListMessage([], tempDir)).toContain("Expected folder:");
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("reports custom pets that are missing spritesheets as not ready", async () => {
-    const tempDir = await mkdtemp(join(tmpdir(), "pi-better-openai-pets-broken-"));
-    try {
+    await withTempDir("pi-better-openai-pets-broken-", async (tempDir) => {
       const petDir = join(tempDir, "pets", "ghost");
       mkdirSync(petDir, { recursive: true });
       writeFileSync(join(petDir, "pet.json"), JSON.stringify({ name: "Ghost" }));
@@ -140,14 +193,11 @@ describe("Codex pets helpers", () => {
       expect(issue.short).toBe('Pet "Ghost" is not ready.');
       expect(issue.message).toContain("exists but is not ready");
       expect(issue.message).toContain("Problem: missing spritesheet.webp");
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("rejects non-file or invalid spritesheets as not ready", async () => {
-    const tempDir = await mkdtemp(join(tmpdir(), "pi-better-openai-pets-invalid-"));
-    try {
+    await withTempDir("pi-better-openai-pets-invalid-", async (tempDir) => {
       const dirSheetPet = join(tempDir, "pets", "dir-sheet");
       mkdirSync(join(dirSheetPet, "spritesheet.webp"), { recursive: true });
       writeFileSync(join(dirSheetPet, "pet.json"), JSON.stringify({ name: "Dir Sheet" }));
@@ -160,16 +210,11 @@ describe("Codex pets helpers", () => {
       const wrongSizePet = join(tempDir, "pets", "wrong-size");
       mkdirSync(wrongSizePet, { recursive: true });
       writeFileSync(join(wrongSizePet, "pet.json"), JSON.stringify({ name: "Wrong Size" }));
-      const wrongSizeSheet = await sharp({
-        create: {
-          width: 1,
-          height: 1,
-          channels: 4,
-          background: { r: 0, g: 0, b: 255, alpha: 1 },
-        },
-      })
-        .webp()
-        .toBuffer();
+      const wrongSizeSheet = await createSpritesheetBuffer({
+        width: 1,
+        height: 1,
+        background: { r: 0, g: 0, b: 255, alpha: 1 },
+      });
       writeFileSync(join(wrongSizePet, "spritesheet.webp"), wrongSizeSheet);
 
       const pets = await listCodexPets(tempDir);
@@ -191,9 +236,7 @@ describe("Codex pets helpers", () => {
       expect(message).toContain(
         "Wrong Size (wrong-size) — invalid atlas dimensions: 1x1; expected 1536x1872",
       );
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("sanitizes pet metadata before display", () => {
@@ -217,15 +260,7 @@ describe("Codex pets helpers", () => {
   });
 
   test("explains requested pet slugs that do not match a ready pet", () => {
-    const pets = [
-      {
-        slug: "stacky-plus",
-        name: "Stacky Plus",
-        dir: "/tmp/stacky-plus",
-        spritesheetPath: "spritesheet.webp",
-        hasSpritesheet: true,
-      },
-    ];
+    const pets = [petPackage("stacky-plus", "Stacky Plus")];
 
     const issue = describeCodexPetSelectionIssue(pets, "missing", "/tmp/codex");
     expect(issue.short).toBe('No ready pet matching "missing".');
@@ -235,20 +270,8 @@ describe("Codex pets helpers", () => {
 
   test("formats /pets select prompts with only ready pets as choices", () => {
     const pets = [
-      {
-        slug: "ready",
-        name: "Ready",
-        dir: "/tmp/ready",
-        spritesheetPath: "spritesheet.webp",
-        hasSpritesheet: true,
-      },
-      {
-        slug: "broken",
-        name: "Broken",
-        dir: "/tmp/broken",
-        spritesheetPath: "spritesheet.webp",
-        hasSpritesheet: false,
-      },
+      petPackage("ready", "Ready"),
+      petPackage("broken", "Broken", { hasSpritesheet: false }),
     ];
 
     expect(_test.formatPetSelectPrompt(pets, "/tmp/codex")).toEqual({
@@ -277,22 +300,11 @@ describe("Codex pets helpers", () => {
   });
 
   test("loads and slices a Codex pet spritesheet", async () => {
-    const tempDir = await mkdtemp(join(tmpdir(), "pi-better-openai-pet-load-"));
-    try {
+    await withTempDir("pi-better-openai-pet-load-", async (tempDir) => {
       const petDir = join(tempDir, "pets", "tiny");
       mkdirSync(petDir, { recursive: true });
       writeFileSync(join(petDir, "pet.json"), JSON.stringify({ name: "Tiny" }));
-      const sheet = await sharp({
-        create: {
-          width: 1536,
-          height: 1872,
-          channels: 4,
-          background: { r: 255, g: 0, b: 0, alpha: 1 },
-        },
-      })
-        .webp()
-        .toBuffer();
-      writeFileSync(join(petDir, "spritesheet.webp"), sheet);
+      await writeValidSpritesheet(join(petDir, "spritesheet.webp"));
 
       const loaded = await loadCodexPet("tiny", tempDir);
       expect(loaded?.pet.name).toBe("Tiny");
@@ -309,29 +321,21 @@ describe("Codex pets helpers", () => {
       expect(nextAnimationFrameDelayMs(loaded?.states.idle ?? [], 0)).toBe(280);
       expect(nextAnimationFrameDelayMs(loaded?.states.idle ?? [], 279)).toBe(1);
       expect(nextAnimationFrameDelayMs(loaded?.states.idle ?? [], 280)).toBe(110);
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("avoids per-frame image encoding and animation output when terminal images are unsupported", async () => {
     setCapabilities({ images: null, trueColor: true, hyperlinks: false });
-    const tempDir = await mkdtemp(join(tmpdir(), "pi-better-openai-pet-no-images-"));
-    try {
+    await withTempDir("pi-better-openai-pet-no-images-", async (tempDir) => {
       const petDir = join(tempDir, "pets", "fallback");
       mkdirSync(petDir, { recursive: true });
       writeFileSync(join(petDir, "pet.json"), JSON.stringify({ name: "Fallback" }));
-      const sheet = await sharp({
-        create: {
-          width: 1536,
-          height: 1872,
-          channels: 4,
-          background: { r: 0, g: 255, b: 0, alpha: 1 },
-        },
-      })
-        .webp()
-        .toBuffer();
-      writeFileSync(join(petDir, "spritesheet.webp"), sheet);
+      await writeValidSpritesheet(join(petDir, "spritesheet.webp"), {
+        r: 0,
+        g: 255,
+        b: 0,
+        alpha: 1,
+      });
 
       const loaded = await loadCodexPet("fallback", tempDir);
       const firstFrame = loaded?.states.idle[0];
@@ -352,31 +356,13 @@ describe("Codex pets helpers", () => {
       );
       expect(rendered[0]).toContain("[Image");
       expect(visibleWidth(rendered[0] ?? "")).toBeLessThanOrEqual(12);
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("deletes stale Kitty placements before placing a pet frame", () => {
     setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
-    const frame: PetFrame = {
-      rawRgbaData: Buffer.from([0, 0, 0, 255]).toString("base64"),
-      kittyImageId: 42,
-      mimeType: "image/png",
-      durationMs: 100,
-      widthPx: 1,
-      heightPx: 1,
-    };
-    const loaded = {
-      pet: {
-        slug: "kitty-cleanup",
-        name: "Kitty Cleanup",
-        dir: "/tmp",
-        spritesheetPath: "spritesheet.webp",
-        hasSpritesheet: true,
-      },
-      states: { idle: [frame] } as LoadedCodexPet["states"],
-    } satisfies LoadedCodexPet;
+    const frame = kittyFrame(42);
+    const loaded = loadedPetWithIdleFrames("kitty-cleanup", "Kitty Cleanup", [frame]);
     const manager = new CodexPetKittyManager(7);
 
     const firstRender = renderCodexPetFrame(
@@ -407,34 +393,8 @@ describe("Codex pets helpers", () => {
 
   test("reuploads Kitty frames when animation loops back to a prior frame", () => {
     setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
-    const frames: PetFrame[] = [
-      {
-        rawRgbaData: Buffer.from([0, 0, 0, 255]).toString("base64"),
-        kittyImageId: 101,
-        mimeType: "image/png",
-        durationMs: 100,
-        widthPx: 1,
-        heightPx: 1,
-      },
-      {
-        rawRgbaData: Buffer.from([255, 0, 0, 255]).toString("base64"),
-        kittyImageId: 102,
-        mimeType: "image/png",
-        durationMs: 100,
-        widthPx: 1,
-        heightPx: 1,
-      },
-    ];
-    const loaded = {
-      pet: {
-        slug: "kitty-loop",
-        name: "Kitty Loop",
-        dir: "/tmp",
-        spritesheetPath: "spritesheet.webp",
-        hasSpritesheet: true,
-      },
-      states: { idle: frames } as LoadedCodexPet["states"],
-    } satisfies LoadedCodexPet;
+    const frames = [kittyFrame(101), kittyFrame(102, [255, 0, 0, 255])];
+    const loaded = loadedPetWithIdleFrames("kitty-loop", "Kitty Loop", frames);
     const manager = new CodexPetKittyManager(10);
 
     const first = renderCodexPetFrame(
@@ -484,24 +444,7 @@ describe("Codex pets helpers", () => {
 
   test("centralizes Kitty frame upload and cleanup lifecycle", () => {
     setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
-    const frame: PetFrame = {
-      rawRgbaData: Buffer.from([0, 0, 0, 255]).toString("base64"),
-      kittyImageId: 84,
-      mimeType: "image/png",
-      durationMs: 100,
-      widthPx: 1,
-      heightPx: 1,
-    };
-    const loaded = {
-      pet: {
-        slug: "kitty-manager",
-        name: "Kitty Manager",
-        dir: "/tmp",
-        spritesheetPath: "spritesheet.webp",
-        hasSpritesheet: true,
-      },
-      states: { idle: [frame] } as LoadedCodexPet["states"],
-    } satisfies LoadedCodexPet;
+    const loaded = loadedPetWithIdleFrames("kitty-manager", "Kitty Manager", [kittyFrame(84)]);
     const manager = new CodexPetKittyManager(9);
 
     const firstRender = renderCodexPetFrame(
@@ -540,8 +483,7 @@ describe("Codex pets helpers", () => {
   });
 
   test("completes pet names for wake and select subcommands", async () => {
-    const tempDir = await mkdtemp(join(tmpdir(), "pi-better-openai-pet-complete-"));
-    try {
+    await withTempDir("pi-better-openai-pet-complete-", async (tempDir) => {
       const petDir = join(tempDir, "pets", "metalgarurumon");
       mkdirSync(petDir, { recursive: true });
       writeFileSync(
@@ -571,27 +513,13 @@ describe("Codex pets helpers", () => {
           description: "metalgarurumon — Cyber wolf",
         },
       ]);
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("builds pet settings picker values for ready pets", () => {
     const pets = [
-      {
-        slug: "stacky-plus",
-        name: "Stacky Plus",
-        dir: "/tmp/stacky-plus",
-        spritesheetPath: "spritesheet.webp",
-        hasSpritesheet: true,
-      },
-      {
-        slug: "broken",
-        name: "Broken",
-        dir: "/tmp/broken",
-        spritesheetPath: "spritesheet.webp",
-        hasSpritesheet: false,
-      },
+      petPackage("stacky-plus", "Stacky Plus"),
+      petPackage("broken", "Broken", { hasSpritesheet: false }),
     ];
     const cfg = { pets: { slug: "" } } as Parameters<typeof _test.petConfigPickerValue>[0];
 
