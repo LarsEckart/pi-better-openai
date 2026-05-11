@@ -158,6 +158,13 @@ describe("Codex pets helpers", () => {
     });
   });
 
+  test("ignores pet lookup requests with no alphanumeric key", () => {
+    const pets = [petPackage("!!!", "!!!")];
+
+    expect(_test.petsTest.findCodexPet(pets, "!!!")).toBeUndefined();
+    expect(_test.petsTest.findReadyCodexPet(pets, "!!!")).toBeUndefined();
+  });
+
   test("returns empty lists and actionable setup text when no pets exist", async () => {
     await withTempDir("pi-better-openai-pets-empty-", async (tempDir) => {
       expect(await listCodexPets(tempDir)).toEqual([]);

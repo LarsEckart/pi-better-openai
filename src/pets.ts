@@ -220,6 +220,18 @@ function petLookupKey(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
+type PetLookupRequest = {
+  hasText: boolean;
+  key?: string;
+};
+
+function petLookupRequest(value?: string): PetLookupRequest {
+  const requestedText = value?.trim();
+  if (!requestedText) return { hasText: false };
+
+  return { hasText: true, key: petLookupKey(requestedText) || undefined };
+}
+
 function petMatchesLookup(pet: CodexPetPackage, requested: string): boolean {
   return (
     petLookupKey(pet.slug) === requested ||
@@ -229,22 +241,22 @@ function petMatchesLookup(pet: CodexPetPackage, requested: string): boolean {
 }
 
 export function findCodexPet(pets: CodexPetPackage[], value?: string): CodexPetPackage | undefined {
-  const requestedText = value?.trim();
-  if (!requestedText) return undefined;
-
-  const requested = petLookupKey(requestedText);
-  return pets.find((pet) => petMatchesLookup(pet, requested));
+  const request = petLookupRequest(value);
+  const { key } = request;
+  if (!key) return undefined;
+  return pets.find((pet) => petMatchesLookup(pet, key));
 }
 
 export function findReadyCodexPet(
   pets: CodexPetPackage[],
   value?: string,
 ): CodexPetPackage | undefined {
-  const requestedText = value?.trim();
-  if (!requestedText) return pets.find((pet) => pet.hasSpritesheet);
+  const request = petLookupRequest(value);
+  if (!request.hasText) return pets.find((pet) => pet.hasSpritesheet);
 
-  const requested = petLookupKey(requestedText);
-  return pets.find((pet) => pet.hasSpritesheet && petMatchesLookup(pet, requested));
+  const { key } = request;
+  if (!key) return undefined;
+  return pets.find((pet) => pet.hasSpritesheet && petMatchesLookup(pet, key));
 }
 
 function selectPet(pets: CodexPetPackage[], slug?: string): CodexPetPackage | undefined {
