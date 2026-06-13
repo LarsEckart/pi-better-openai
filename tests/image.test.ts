@@ -190,6 +190,12 @@ describe("image helpers", () => {
       "image/png",
     );
     expect(extracted?.data).toBe("Zm9v");
+
+    const partial = _test.imageTest.extractImageFromEvent(
+      { partial_image_b64: "cGFydGlhbA==" },
+      "image/png",
+    );
+    expect(partial).toMatchObject({ status: "partial", data: "cGFydGlhbA==" });
   });
 
   test("builds image generation requests", () => {
@@ -234,6 +240,35 @@ describe("openai_image tool execution", () => {
       { type: "image", data: "Zm9v", mimeType: "image/png" },
     ]);
     expect(result.details).toMatchObject({ id: "ig_test", data: "Zm9v", savedPath: undefined });
+  });
+
+  test("waits for a final image_generation_call when partial image events arrive first", async () => {
+    stubFetch(
+      sseResponse([{ partial_image_b64: "cGFydGlhbA==" }, finalImageEvent("ig_final", "ZmluYWw=")]),
+    );
+    const harness = createImageHarness({
+      registryCredentials: JSON.stringify({ access: "test-access", accountId: "acct_test" }),
+    });
+
+    const result = await executeImageTool(harness, { prompt: "draw", save: "none" });
+
+    expect(result.content).toContainEqual({
+      type: "image",
+      data: "ZmluYWw=",
+      mimeType: "image/png",
+    });
+    expect(result.details).toMatchObject({ id: "ig_final", data: "ZmluYWw=" });
+  });
+
+  test("rejects streams that end without a completed image_generation_call", async () => {
+    stubFetch(sseResponse([{ partial_image_b64: "cGFydGlhbA==" }]));
+    const harness = createImageHarness({
+      registryCredentials: JSON.stringify({ access: "test-access", accountId: "acct_test" }),
+    });
+
+    await expect(executeImageTool(harness, { prompt: "draw", save: "none" })).rejects.toThrow(
+      "No completed image_generation_call result returned by Codex.",
+    );
   });
 
   test("uploads project-local reference images and saves generated output to the project", async () => {

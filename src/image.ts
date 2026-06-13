@@ -376,10 +376,15 @@ function extractImageFromEvent(
       mimeType,
     };
   }
-  const partial = event.partial_image_b64 ?? event.b64_json;
+  const partial =
+    typeof event.partial_image_b64 === "string"
+      ? event.partial_image_b64
+      : typeof event.b64_json === "string"
+        ? event.b64_json
+        : undefined;
   if (typeof partial === "string" && partial.trim()) {
     const { data, mimeType } = dataUrlParts(partial, fallbackMimeType);
-    return { id: `ig_${randomUUID().slice(0, 8)}`, status: "completed", data, mimeType };
+    return { id: `ig_${randomUUID().slice(0, 8)}`, status: "partial", data, mimeType };
   }
   return undefined;
 }
@@ -448,8 +453,8 @@ async function parseSseForImage(
   } finally {
     reader.releaseLock();
   }
-  if (lastImage) return lastImage;
-  throw new Error("No image_generation_call result returned by Codex.");
+  if (lastImage?.status === "completed") return lastImage;
+  throw new Error("No completed image_generation_call result returned by Codex.");
 }
 
 async function requestCodexImage(
