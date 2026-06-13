@@ -37,6 +37,8 @@ export class UsageController {
   private queuedUsageRefresh: QueuedUsageRefresh | undefined;
   private shuttingDown = false;
   private usageAbortController: AbortController | undefined;
+  private sessionAbortSignal: AbortSignal | undefined;
+  private sessionAbortHandler: (() => void) | undefined;
 
   constructor(
     private readonly getConfig: (ctx: ExtensionContext) => ResolvedConfig,
@@ -157,18 +159,44 @@ export class UsageController {
     }
   }
 
-  start(ctx: ExtensionContext): void {
+  private stopTimer(): void {
     if (this.usageTimer) clearInterval(this.usageTimer);
+    this.usageTimer = undefined;
+    if (this.sessionAbortSignal && this.sessionAbortHandler) {
+      this.sessionAbortSignal.removeEventListener("abort", this.sessionAbortHandler);
+    }
+    this.sessionAbortSignal = undefined;
+    this.sessionAbortHandler = undefined;
+  }
+
+  start(ctx: ExtensionContext): void {
+    this.shuttingDown = false;
+    this.stopTimer();
     const cfg = this.getConfig(ctx);
     if (!cfg.usage.enabled) return;
+    const sessionSignal = ctx.signal;
+    if (sessionSignal?.aborted) return;
+    this.sessionAbortSignal = sessionSignal;
+    this.sessionAbortHandler = () => {
+      this.stopTimer();
+      this.usageAbortController?.abort();
+      this.usageAbortController = undefined;
+      this.queuedUsageRefresh = undefined;
+    };
+    sessionSignal?.addEventListener("abort", this.sessionAbortHandler, { once: true });
     void this.refresh(ctx, undefined, { force: true });
-    this.usageTimer = setInterval(() => void this.refresh(ctx), cfg.usage.refreshIntervalMs);
+    this.usageTimer = setInterval(() => {
+      if (sessionSignal?.aborted) {
+        this.stopTimer();
+        return;
+      }
+      void this.refresh(ctx);
+    }, cfg.usage.refreshIntervalMs);
     this.usageTimer.unref?.();
   }
 
   restartAfterSettingsChange(ctx: ExtensionContext, cfg: ResolvedConfig): void {
-    if (this.usageTimer) clearInterval(this.usageTimer);
-    this.usageTimer = undefined;
+    this.stopTimer();
     if (cfg.usage.enabled) this.start(ctx);
     else {
       this.usageSnapshot = undefined;
@@ -181,7 +209,6 @@ export class UsageController {
     this.queuedUsageRefresh = undefined;
     this.usageAbortController?.abort();
     this.usageAbortController = undefined;
-    if (this.usageTimer) clearInterval(this.usageTimer);
-    this.usageTimer = undefined;
+    this.stopTimer();
   }
 }

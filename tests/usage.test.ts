@@ -100,6 +100,7 @@ async function createUsageHarness(options: {
   model?: ExtensionContext["model"];
   isUsingOAuth?: boolean;
   writeAuth?: boolean;
+  signal?: AbortSignal;
 }): Promise<UsageHarness> {
   const cwd = createTempDir("pi-better-openai-usage-project-");
   const agentDir = createTempDir("pi-better-openai-usage-agent-");
@@ -132,7 +133,7 @@ async function createUsageHarness(options: {
   const ctx = {
     cwd,
     hasUI: true,
-    signal: undefined,
+    signal: options.signal,
     model: options.model ?? { provider: "openai", id: "gpt-5.5" },
     ui: {
       notify: vi.fn(),
@@ -326,6 +327,35 @@ describe("usage polling lifecycle", () => {
       expect.stringContaining("5h: 90%"),
     );
     await emit(harness, "session_shutdown");
+  });
+
+  test("stops interval polling when the session signal aborts", async () => {
+    vi.useFakeTimers();
+    const abortController = new AbortController();
+    const fetchMock = stubUsageFetch(usageJsonResponse);
+    const harness = await createUsageHarness({
+      usageConfig: {
+        enabled: true,
+        refreshIntervalMs: 15000,
+        showOnlyOnSubscriptionModels: true,
+      },
+      isUsingOAuth: true,
+      signal: abortController.signal,
+    });
+
+    await emit(harness, "session_start");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    abortController.abort();
+    Object.defineProperty(harness.ctx, "model", {
+      get() {
+        throw new Error("stale ctx model access");
+      },
+    });
+    fetchMock.mockClear();
+
+    await vi.advanceTimersByTimeAsync(60000);
+
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   test("throttles repeated turn-end refreshes within the configured interval", async () => {
