@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join, resolve, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import sharp from "sharp";
 import type { ResolvedConfig } from "./config.ts";
 import { isRecord } from "./config.ts";
 import { readCodexAuth } from "./usage.ts";
@@ -11,6 +12,8 @@ const OPENAI_IMAGE_TOOL = "openai_image";
 const OPENAI_IMAGE_COMMAND = "openai-image";
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const DEFAULT_TIMEOUT_MS = 180_000;
+const MAX_IMAGE_INPUT_BYTES = 20 * 1024 * 1024;
+const SUPPORTED_INPUT_IMAGE_FORMATS = new Set(["png", "jpeg", "jpg", "webp", "gif"]);
 
 export const IMAGE_SAVE_MODES = ["none", "project", "global", "custom"] as const;
 export const IMAGE_ACTIONS = ["auto", "generate", "edit"] as const;
@@ -206,12 +209,49 @@ function extensionForFormat(format: ImageOutputFormat): string {
   return format === "jpeg" ? "jpg" : format;
 }
 
+function isInsideDirectory(root: string, child: string): boolean {
+  const normalizedRoot = resolve(root);
+  const normalizedChild = resolve(child);
+  return (
+    normalizedChild !== normalizedRoot && normalizedChild.startsWith(`${normalizedRoot}${sep}`)
+  );
+}
+
+async function validateImageInput(path: string, workspaceRoot: string): Promise<void> {
+  const realWorkspaceRoot = await realpath(workspaceRoot).catch(() => workspaceRoot);
+  const realInputPath = await realpath(path).catch(() => undefined);
+  if (!realInputPath || !isInsideDirectory(realWorkspaceRoot, realInputPath))
+    throw new Error(
+      `Image input must be a file inside the current workspace: ${displayPath(path)}`,
+    );
+
+  const pathStats = await stat(path).catch(() => undefined);
+  if (!pathStats?.isFile())
+    throw new Error(
+      `Image input must be a file inside the current workspace: ${displayPath(path)}`,
+    );
+  if (pathStats.size > MAX_IMAGE_INPUT_BYTES)
+    throw new Error(`Image input is too large (max 20 MB): ${displayPath(path)}`);
+
+  const metadata = await sharp(path, { animated: false })
+    .metadata()
+    .catch(() => undefined);
+  if (!metadata?.format || !SUPPORTED_INPUT_IMAGE_FORMATS.has(metadata.format))
+    throw new Error(`Image input is not a readable image: ${displayPath(path)}`);
+}
+
 async function readImageInputs(paths: string[] | undefined, cwd: string): Promise<ImageInput[]> {
   const inputs: ImageInput[] = [];
+  const workspaceRoot = resolve(cwd);
   for (const rawPath of paths ?? []) {
     const trimmed = rawPath.trim();
     if (!trimmed) continue;
-    const path = isAbsolute(trimmed) ? trimmed : resolve(cwd, trimmed);
+    const path = isAbsolute(trimmed) ? resolve(trimmed) : resolve(workspaceRoot, trimmed);
+    if (!isInsideDirectory(workspaceRoot, path))
+      throw new Error(
+        `Image input must be a file inside the current workspace: ${displayPath(path)}`,
+      );
+    await validateImageInput(path, workspaceRoot);
     const data = (await readFile(path)).toString("base64");
     inputs.push({ path, data, mimeType: imageMimeType(path) });
   }
@@ -676,6 +716,7 @@ export const _imageTest = {
   DEFAULT_TIMEOUT_MS,
   OPENAI_IMAGE_TOOL,
   OPENAI_IMAGE_COMMAND,
+  MAX_IMAGE_INPUT_BYTES,
   extractAccountIdFromJwt,
   imageMimeType,
   dataUrlParts,

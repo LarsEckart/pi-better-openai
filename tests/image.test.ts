@@ -1,7 +1,16 @@
-import { mkdtempSync, rmSync, writeFileSync, readdirSync, readFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  truncateSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir, homedir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import sharp from "sharp";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { _test } from "../index.ts";
 import { registerOpenAIImage } from "../src/image.ts";
@@ -59,6 +68,19 @@ function finalImageEvent(id = "ig_test", data = "Zm9v") {
     type: "response.output_item.done",
     item: { type: "image_generation_call", id, status: "completed", result: data },
   };
+}
+
+async function writeTinyPng(path: string): Promise<void> {
+  await sharp({
+    create: {
+      width: 1,
+      height: 1,
+      channels: 4,
+      background: { r: 0, g: 0, b: 0, alpha: 1 },
+    },
+  })
+    .png()
+    .toFile(path);
 }
 
 function createImageHarness(
@@ -206,7 +228,12 @@ describe("openai_image tool execution", () => {
 
   test("uploads project-local reference images and saves generated output to the project", async () => {
     const cwd = createTempProject();
-    writeFileSync(join(cwd, "input.png"), Buffer.from("reference"));
+    const relativeInput = join(cwd, "input.png");
+    const absoluteInput = join(cwd, "absolute.png");
+    await writeTinyPng(relativeInput);
+    await writeTinyPng(absoluteInput);
+    const relativeData = readFileSync(relativeInput).toString("base64");
+    const absoluteData = readFileSync(absoluteInput).toString("base64");
     const fetchMock = stubFetch(sseResponse([finalImageEvent("ig_saved", "Zm9v")]));
     const harness = createImageHarness({
       cwd,
@@ -214,21 +241,99 @@ describe("openai_image tool execution", () => {
       imageConfig: { defaultSave: "project" },
     });
 
-    const result = await executeImageTool(harness, { prompt: "edit it", images: ["input.png"] });
+    const result = await executeImageTool(harness, {
+      prompt: "edit it",
+      images: ["input.png", absoluteInput],
+    });
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(String(init.body)) as { input: Array<{ content: unknown[] }> };
-    expect(body.input[0]?.content).toContainEqual({
-      type: "input_image",
-      detail: "auto",
-      image_url: `data:image/png;base64,${Buffer.from("reference").toString("base64")}`,
-    });
+    expect(body.input[0]?.content).toEqual([
+      { type: "input_text", text: "edit it" },
+      {
+        type: "input_image",
+        detail: "auto",
+        image_url: `data:image/png;base64,${relativeData}`,
+      },
+      {
+        type: "input_image",
+        detail: "auto",
+        image_url: `data:image/png;base64,${absoluteData}`,
+      },
+    ]);
     const outputDir = join(cwd, ".pi", "generated-images");
     const files = readdirSync(outputDir);
     expect(files).toHaveLength(1);
     expect(files[0]).toMatch(/^openai-image-.*-ig_saved\.png$/);
     expect(readFileSync(join(outputDir, files[0]!)).toString("base64")).toBe("Zm9v");
     expect(result.details).toMatchObject({ savedPath: join(outputDir, files[0]!) });
+  });
+
+  test("rejects image paths outside the workspace before upload", async () => {
+    const cwd = createTempProject();
+    const outsideDir = createTempProject();
+    const outsideImage = join(outsideDir, "outside.png");
+    await writeTinyPng(outsideImage);
+    const fetchMock = stubFetch(sseResponse([finalImageEvent()]));
+    const harness = createImageHarness({
+      cwd,
+      registryCredentials: JSON.stringify({ access: "test-access", accountId: "acct_test" }),
+    });
+
+    await expect(
+      executeImageTool(harness, { prompt: "draw", images: [outsideImage] }),
+    ).rejects.toThrow("Image input must be a file inside the current workspace");
+    await expect(
+      executeImageTool(harness, { prompt: "draw", images: [relative(cwd, outsideImage)] }),
+    ).rejects.toThrow("Image input must be a file inside the current workspace");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("rejects directory image inputs before upload", async () => {
+    const cwd = createTempProject();
+    mkdirSync(join(cwd, "images"));
+    const fetchMock = stubFetch(sseResponse([finalImageEvent()]));
+    const harness = createImageHarness({
+      cwd,
+      registryCredentials: JSON.stringify({ access: "test-access", accountId: "acct_test" }),
+    });
+
+    await expect(executeImageTool(harness, { prompt: "draw", images: ["images"] })).rejects.toThrow(
+      "Image input must be a file inside the current workspace",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("rejects non-image files before upload", async () => {
+    const cwd = createTempProject();
+    writeFileSync(join(cwd, "notes.txt"), "not an image", "utf8");
+    const fetchMock = stubFetch(sseResponse([finalImageEvent()]));
+    const harness = createImageHarness({
+      cwd,
+      registryCredentials: JSON.stringify({ access: "test-access", accountId: "acct_test" }),
+    });
+
+    await expect(
+      executeImageTool(harness, { prompt: "draw", images: ["notes.txt"] }),
+    ).rejects.toThrow("Image input is not a readable image");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("rejects oversized image inputs before upload", async () => {
+    const cwd = createTempProject();
+    const largeImage = join(cwd, "large.png");
+    writeFileSync(largeImage, "");
+    truncateSync(largeImage, _test.imageTest.MAX_IMAGE_INPUT_BYTES + 1);
+    const fetchMock = stubFetch(sseResponse([finalImageEvent()]));
+    const harness = createImageHarness({
+      cwd,
+      registryCredentials: JSON.stringify({ access: "test-access", accountId: "acct_test" }),
+    });
+
+    await expect(
+      executeImageTool(harness, { prompt: "draw", images: ["large.png"] }),
+    ).rejects.toThrow("Image input is too large");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   test("rejects when image generation is disabled before calling fetch", async () => {
