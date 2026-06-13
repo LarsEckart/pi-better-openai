@@ -1,8 +1,129 @@
-import { homedir } from "node:os";
+import { mkdtempSync, rmSync, writeFileSync, readdirSync, readFileSync } from "node:fs";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "vitest";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { _test } from "../index.ts";
+import { registerOpenAIImage } from "../src/image.ts";
 import { makeResolvedConfig } from "./helpers.ts";
+
+vi.mock("../src/usage.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/usage.ts")>();
+  return { ...actual, readCodexAuth: vi.fn(() => undefined) };
+});
+
+type ToolExecute = (
+  toolCallId: string,
+  params: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+  onUpdate: ((update: unknown) => void) | undefined,
+  ctx: ExtensionContext,
+) => Promise<{ content: unknown[]; details?: unknown }>;
+
+type RegisteredTool = {
+  name: string;
+  execute: ToolExecute;
+};
+
+type ImageHarness = {
+  ctx: ExtensionContext;
+  tool: RegisteredTool;
+  getDebug: Awaited<ReturnType<typeof registerOpenAIImage>>["getDebug"];
+};
+
+const tempDirs: string[] = [];
+
+function createTempProject() {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-better-openai-image-"));
+  tempDirs.push(cwd);
+  return cwd;
+}
+
+function sseResponse(events: unknown[]): Response {
+  const encoder = new TextEncoder();
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        for (const event of events) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        }
+        controller.close();
+      },
+    }),
+    { headers: { "content-type": "text/event-stream" } },
+  );
+}
+
+function finalImageEvent(id = "ig_test", data = "Zm9v") {
+  return {
+    type: "response.output_item.done",
+    item: { type: "image_generation_call", id, status: "completed", result: data },
+  };
+}
+
+function createImageHarness(
+  options: {
+    cwd?: string;
+    registryCredentials?: string | undefined;
+    imageConfig?: Partial<typeof _test.DEFAULT_IMAGE_CONFIG>;
+  } = {},
+): ImageHarness {
+  const cwd = options.cwd ?? createTempProject();
+  let registeredTool: RegisteredTool | undefined;
+  const pi = {
+    registerTool: vi.fn((tool: RegisteredTool) => {
+      registeredTool = tool;
+    }),
+    registerCommand: vi.fn(),
+    registerMessageRenderer: vi.fn(),
+  } as unknown as ExtensionAPI;
+  const ctx = {
+    cwd,
+    hasUI: true,
+    signal: undefined,
+    model: { provider: "openai-codex", id: "gpt-5.5" },
+    ui: { notify: vi.fn(), setFooter: vi.fn(), setStatus: vi.fn() },
+    sessionManager: {
+      getEntries: vi.fn(() => []),
+      getCwd: vi.fn(() => cwd),
+      getSessionName: vi.fn(() => undefined),
+    },
+    modelRegistry: {
+      getApiKeyForProvider: vi.fn(() => Promise.resolve(options.registryCredentials)),
+      isUsingOAuth: vi.fn(() => true),
+    },
+    getContextUsage: vi.fn(() => ({ contextWindow: 0, percent: 0 })),
+  } as unknown as ExtensionContext;
+  const cfg = makeResolvedConfig({
+    image: {
+      ..._test.DEFAULT_IMAGE_CONFIG,
+      enabled: true,
+      defaultSave: "none",
+      ...options.imageConfig,
+    },
+  });
+  const debug = registerOpenAIImage(pi, () => cfg);
+  if (!registeredTool) throw new Error("openai_image tool was not registered.");
+  return { ctx, tool: registeredTool, getDebug: debug.getDebug };
+}
+
+function stubFetch(response: Response): ReturnType<typeof vi.fn> {
+  const fetchMock = vi.fn(() => Promise.resolve(response));
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+async function executeImageTool(harness: ImageHarness, params: Record<string, unknown>) {
+  return harness.tool.execute("tool-call-1", params, undefined, vi.fn(), harness.ctx);
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.clearAllMocks();
+  for (const tempDir of tempDirs.splice(0)) {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
 
 describe("image helpers", () => {
   test("exposes image tool defaults", () => {
@@ -48,5 +169,100 @@ describe("image helpers", () => {
         [],
       ).tool_choice,
     ).toEqual({ type: "image_generation" });
+  });
+});
+
+describe("openai_image tool execution", () => {
+  test("executes through the registered tool and sends a Codex image request", async () => {
+    const fetchMock = stubFetch(sseResponse([finalImageEvent()]));
+    const harness = createImageHarness({
+      registryCredentials: JSON.stringify({ access: "test-access", accountId: "acct_test" }),
+    });
+
+    const result = await executeImageTool(harness, { prompt: "draw an otter", save: "none" });
+
+    expect(harness.tool.name).toBe("openai_image");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(_test.imageTest.CODEX_RESPONSES_URL);
+    expect(init.headers).toMatchObject({
+      authorization: "Bearer test-access",
+      "chatgpt-account-id": "acct_test",
+    });
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    expect(body).toMatchObject({
+      model: "gpt-5.5",
+      tool_choice: { type: "image_generation" },
+    });
+    expect(body.input).toMatchObject([
+      { role: "user", content: [{ type: "input_text", text: "draw an otter" }] },
+    ]);
+    expect(result.content).toEqual([
+      { type: "text", text: expect.stringContaining("Generated image") },
+      { type: "image", data: "Zm9v", mimeType: "image/png" },
+    ]);
+    expect(result.details).toMatchObject({ id: "ig_test", data: "Zm9v", savedPath: undefined });
+  });
+
+  test("uploads project-local reference images and saves generated output to the project", async () => {
+    const cwd = createTempProject();
+    writeFileSync(join(cwd, "input.png"), Buffer.from("reference"));
+    const fetchMock = stubFetch(sseResponse([finalImageEvent("ig_saved", "Zm9v")]));
+    const harness = createImageHarness({
+      cwd,
+      registryCredentials: JSON.stringify({ access: "test-access", accountId: "acct_test" }),
+      imageConfig: { defaultSave: "project" },
+    });
+
+    const result = await executeImageTool(harness, { prompt: "edit it", images: ["input.png"] });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body)) as { input: Array<{ content: unknown[] }> };
+    expect(body.input[0]?.content).toContainEqual({
+      type: "input_image",
+      detail: "auto",
+      image_url: `data:image/png;base64,${Buffer.from("reference").toString("base64")}`,
+    });
+    const outputDir = join(cwd, ".pi", "generated-images");
+    const files = readdirSync(outputDir);
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatch(/^openai-image-.*-ig_saved\.png$/);
+    expect(readFileSync(join(outputDir, files[0]!)).toString("base64")).toBe("Zm9v");
+    expect(result.details).toMatchObject({ savedPath: join(outputDir, files[0]!) });
+  });
+
+  test("rejects when image generation is disabled before calling fetch", async () => {
+    const fetchMock = stubFetch(sseResponse([finalImageEvent()]));
+    const harness = createImageHarness({
+      registryCredentials: JSON.stringify({ access: "test-access", accountId: "acct_test" }),
+      imageConfig: { enabled: false },
+    });
+
+    await expect(executeImageTool(harness, { prompt: "draw" })).rejects.toThrow(
+      "OpenAI image generation is disabled in config.",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("rejects when Codex credentials are missing before calling fetch", async () => {
+    const fetchMock = stubFetch(sseResponse([finalImageEvent()]));
+    const harness = createImageHarness({ registryCredentials: undefined });
+
+    await expect(executeImageTool(harness, { prompt: "draw" })).rejects.toThrow(
+      "Missing openai-codex OAuth credentials.",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("rejects non-OK Codex responses", async () => {
+    const fetchMock = stubFetch(new Response("upstream nope", { status: 500, statusText: "Nope" }));
+    const harness = createImageHarness({
+      registryCredentials: JSON.stringify({ access: "test-access", accountId: "acct_test" }),
+    });
+
+    await expect(executeImageTool(harness, { prompt: "draw" })).rejects.toThrow(
+      "Codex image request failed (500)",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
