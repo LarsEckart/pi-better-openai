@@ -16,7 +16,7 @@ This index tracks the GitHub issue-backed improvement plans for this repository.
 | 010: Patch the high `fast-xml-builder` advisory in the peer tree             | [#12](https://github.com/mattleong/pi-better-openai/issues/12) | Done   |
 | 011: Align Node runtime and type declarations                                | [#13](https://github.com/mattleong/pi-better-openai/issues/13) | Done   |
 | 012: Cover settings writes and config precedence                             | [#14](https://github.com/mattleong/pi-better-openai/issues/14) | Done   |
-| 013: Document auth, config, image API, and contributor workflow              | [#15](https://github.com/mattleong/pi-better-openai/issues/15) | Open   |
+| 013: Document auth, config, image API, and contributor workflow              | [#15](https://github.com/mattleong/pi-better-openai/issues/15) | Done   |
 | 014: Fix footer home-path abbreviation boundary                              | [#16](https://github.com/mattleong/pi-better-openai/issues/16) | Open   |
 | 015: Cache pet discovery metadata and avoid unrelated pet validation on load | [#17](https://github.com/mattleong/pi-better-openai/issues/17) | Open   |
 | 016: Consolidate config and settings option metadata                         | [#18](https://github.com/mattleong/pi-better-openai/issues/18) | Open   |

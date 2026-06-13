@@ -1,6 +1,6 @@
 # pi-better-openai
 
-A pi extension for OpenAI subscription workflows: fast mode, usage visibility, footer polish, and image generation through `openai-codex` auth.
+A pi extension for OpenAI subscription workflows: fast mode, usage visibility, footer polish, custom Codex pets, and image generation through `openai-codex` auth.
 
 ## Install
 
@@ -16,6 +16,15 @@ Or install from npm:
 pi install npm:pi-better-openai
 ```
 
+## Authentication
+
+Usage display and image generation require pi's `openai-codex` OAuth credentials.
+
+1. In pi, run `/login openai-codex`.
+2. Verify subscription usage with `/openai-usage`, or open `/openai-settings` and check **Diagnostics**.
+3. The extension reads auth from pi's agent auth store, normally `~/.pi/agent/auth.json`. Do not copy, paste, or commit values from this file.
+4. If `PI_CODING_AGENT_DIR` is set, the auth store and global generated-image directory use that agent directory instead of `~/.pi/agent`.
+
 ## Features
 
 - Fast mode for supported OpenAI models, toggled with `/fast` or in `/openai-settings`.
@@ -30,6 +39,86 @@ pi install npm:pi-better-openai
   - `/pets [help|list|wake [slug]|tuck|select <slug>]` renders or manages custom pets from `${CODEX_HOME:-~/.codex}/pets`.
   - `/openai-usage` shows current OpenAI subscription usage.
   - `/openai-settings` opens settings, diagnostics, and config details.
+
+## Configuration
+
+The extension reads JSON config from two locations:
+
+- Project config: `.pi/extensions/pi-better-openai.json`
+- Global config: `~/.pi/agent/extensions/pi-better-openai.json`
+
+Project overrides global. Global values fill fields omitted by the project file. Invalid enum values are ignored, and numeric settings are clamped to safe ranges.
+
+Default supported models:
+
+```json
+["openai/gpt-5.4", "openai/gpt-5.5", "openai-codex/gpt-5.4", "openai-codex/gpt-5.5"]
+```
+
+Example config:
+
+```json
+{
+  "persistState": true,
+  "desiredActive": false,
+  "supportedModels": ["openai/gpt-5.5", "openai-codex/gpt-5.5"],
+  "usage": {
+    "enabled": true,
+    "refreshIntervalMs": 60000,
+    "showOnlyOnSubscriptionModels": true,
+    "showResetTimes": true
+  },
+  "footer": {
+    "mode": "status"
+  },
+  "image": {
+    "enabled": true,
+    "defaultModel": "gpt-5.5",
+    "defaultSave": "project",
+    "outputFormat": "png",
+    "timeoutMs": 180000
+  },
+  "pets": {
+    "enabled": false,
+    "slug": "",
+    "placement": "inline-right",
+    "state": "idle",
+    "thinkingState": "review",
+    "toolState": "running",
+    "failedToolState": "failed",
+    "idleEmotes": true,
+    "idleEmoteIntervalMs": 30000,
+    "sizeCells": 10
+  }
+}
+```
+
+## Image generation
+
+Use the command for quick generation:
+
+```text
+/openai-image draw an otter reading a terminal
+```
+
+Agents can call the `openai_image` tool directly. Supported parameters:
+
+- `prompt` (required): pass the user's image wording verbatim.
+- `action`: `auto`, `generate`, or `edit`.
+- `images`: project-local reference/edit image paths. Paths must stay inside the current workspace and point to readable PNG, JPEG, WebP, or GIF files.
+- `model`: Codex image model override, for example `openai-codex/gpt-5.5`.
+- `outputFormat`: `png`, `jpeg`, or `webp`.
+- `save`: `project`, `global`, `custom`, or `none`.
+- `saveDir`: required for `save: "custom"` unless `PI_IMAGE_SAVE_DIR` is set.
+
+Save modes:
+
+- `project` writes to `.pi/generated-images/` in the current project.
+- `global` writes to the agent `generated-images` directory, normally `~/.pi/agent/generated-images/` or `$PI_CODING_AGENT_DIR/generated-images/`.
+- `custom` writes to `saveDir` or `PI_IMAGE_SAVE_DIR`.
+- `none` returns the image without saving it.
+
+The repository ignores `.pi/`, so generated images and local config should not be committed.
 
 ## Codex pets
 
