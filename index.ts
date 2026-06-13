@@ -32,11 +32,13 @@ import {
   DEFAULT_IMAGE_CONFIG,
   DEFAULT_PET_CONFIG,
   DEFAULT_SUPPORTED_MODELS,
-  FOOTER_MODES,
-  IMAGE_OUTPUT_FORMATS,
-  IMAGE_SAVE_MODES,
-  PET_PLACEMENTS,
   PET_STATES,
+  FOOTER_SETTING_DESCRIPTORS,
+  USAGE_SETTING_DESCRIPTORS,
+  IMAGE_SETTING_DESCRIPTORS,
+  PET_SETTING_DESCRIPTORS,
+  FAST_SETTING_DESCRIPTORS,
+  type SettingsOptionDescriptor,
   configPaths,
   type ResolvedConfig,
   type PetPlacement,
@@ -959,80 +961,13 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   }
 
   function buildPetSettingsItems(cfg: ResolvedConfig): SettingsPickerItem[] {
-    return [
-      {
-        id: "pets.enabled",
-        label: "Enabled",
-        currentValue: String(cfg.pets.enabled),
-        values: ["true", "false"],
-        description:
-          "Render a custom Codex pet from ${CODEX_HOME:-~/.codex}/pets in the Better OpenAI footer.",
-      },
-      {
-        id: "pets.slug",
-        label: "Pet",
+    return settingsItemsFromDescriptors(PET_SETTING_DESCRIPTORS, cfg, {
+      "pets.slug": {
         currentValue: petConfigPickerValue(cfg),
         values: readyPetPickerValues(petSettingsPets),
         description: petPickerDescription(cfg, petSettingsPets),
       },
-      {
-        id: "pets.placement",
-        label: "Placement",
-        currentValue: cfg.pets.placement,
-        values: [...PET_PLACEMENTS],
-        description:
-          "Footer layout: stacked, inline-left, inline-right, badge, or habitat divider.",
-      },
-      {
-        id: "pets.state",
-        label: "Idle state",
-        currentValue: cfg.pets.state,
-        values: [...PET_STATES],
-        description: "Animation row to show when pi is idle.",
-      },
-      {
-        id: "pets.thinkingState",
-        label: "Thinking state",
-        currentValue: cfg.pets.thinkingState,
-        values: [...PET_STATES],
-        description: "Animation row to show while the model is thinking or streaming.",
-      },
-      {
-        id: "pets.toolState",
-        label: "Tool state",
-        currentValue: cfg.pets.toolState,
-        values: [...PET_STATES],
-        description: "Animation row to show during tool execution.",
-      },
-      {
-        id: "pets.failedToolState",
-        label: "Failed tool state",
-        currentValue: cfg.pets.failedToolState,
-        values: [...PET_STATES],
-        description: "Animation row to flash after any tool call returns an error.",
-      },
-      {
-        id: "pets.idleEmotes",
-        label: "Random idle emotes",
-        currentValue: String(cfg.pets.idleEmotes),
-        values: ["true", "false"],
-        description: "Occasionally flash a wave or jump while pi is idle.",
-      },
-      {
-        id: "pets.idleEmoteIntervalMs",
-        label: "Idle emote interval",
-        currentValue: String(cfg.pets.idleEmoteIntervalMs),
-        values: ["5000", "15000", "30000", "60000", "120000", "300000"],
-        description: "Average delay between random idle pet emotes in milliseconds.",
-      },
-      {
-        id: "pets.sizeCells",
-        label: "Size",
-        currentValue: String(cfg.pets.sizeCells),
-        values: ["4", "6", "8", "10", "12", "16"],
-        description: "Pet image width in terminal cells.",
-      },
-    ];
+    });
   }
 
   function petPreviewFromItem(item: SettingsPickerItem | undefined): PetState | undefined {
@@ -1263,6 +1198,29 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     return `${status} · ${selected} · ${cfg.pets.placement}`;
   }
 
+  type SettingsItemOverrides = Record<
+    string,
+    Partial<Pick<SettingsPickerItem, "currentValue" | "description" | "values">>
+  >;
+
+  function settingsItemsFromDescriptors(
+    descriptors: readonly SettingsOptionDescriptor[],
+    cfg: ResolvedConfig,
+    overrides: SettingsItemOverrides = {},
+  ): SettingsPickerItem[] {
+    return descriptors.map((descriptor) => {
+      const override = overrides[descriptor.id] ?? {};
+      const values = override.values ?? descriptor.values;
+      return {
+        id: descriptor.id,
+        label: descriptor.label,
+        currentValue: override.currentValue ?? descriptor.currentValue(cfg),
+        values: values ? [...values] : undefined,
+        description: override.description ?? descriptor.description,
+      };
+    });
+  }
+
   function buildFastSettingsItems(
     ctx: ExtensionContext,
     cfg: ResolvedConfig,
@@ -1275,101 +1233,20 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
         values: ["true", "false"],
         description: `Request OpenAI fast mode. Activates for supported models: ${modelList(cfg.supportedModels)}.`,
       },
-      {
-        id: "persistState",
-        label: "Persist fast state",
-        currentValue: String(cfg.persistState),
-        values: ["true", "false"],
-        description: "Remember fast-mode state across sessions.",
-      },
+      ...settingsItemsFromDescriptors(FAST_SETTING_DESCRIPTORS, cfg),
     ];
   }
 
   function buildFooterSettingsItems(cfg: ResolvedConfig): SettingsPickerItem[] {
-    return [
-      {
-        id: "footer.mode",
-        label: "Footer mode",
-        currentValue: cfg.footer.mode,
-        values: [...FOOTER_MODES],
-        description:
-          "replace = custom footer, status = pi footer plus status line, off = no Better OpenAI footer/status unless Footer pet is enabled.",
-      },
-    ];
+    return settingsItemsFromDescriptors(FOOTER_SETTING_DESCRIPTORS, cfg);
   }
 
   function buildUsageSettingsItems(cfg: ResolvedConfig): SettingsPickerItem[] {
-    return [
-      {
-        id: "usage.enabled",
-        label: "Usage display",
-        currentValue: String(cfg.usage.enabled),
-        values: ["true", "false"],
-        description: "Fetch and display OpenAI subscription usage windows.",
-      },
-      {
-        id: "usage.refreshIntervalMs",
-        label: "Usage refresh",
-        currentValue: String(cfg.usage.refreshIntervalMs),
-        values: ["15000", "30000", "60000", "120000", "300000", "600000"],
-        description: "Usage refresh interval in milliseconds.",
-      },
-      {
-        id: "usage.showOnlyOnSubscriptionModels",
-        label: "Usage only on OAuth",
-        currentValue: String(cfg.usage.showOnlyOnSubscriptionModels),
-        values: ["true", "false"],
-        description: "Only show usage when the current OpenAI model uses subscription/OAuth auth.",
-      },
-      {
-        id: "usage.showResetTimes",
-        label: "Usage reset times",
-        currentValue: String(cfg.usage.showResetTimes),
-        values: ["true", "false"],
-        description: "Include compact reset countdowns and local reset times.",
-      },
-    ];
+    return settingsItemsFromDescriptors(USAGE_SETTING_DESCRIPTORS, cfg);
   }
 
   function buildImageSettingsItems(cfg: ResolvedConfig): SettingsPickerItem[] {
-    return [
-      {
-        id: "image.enabled",
-        label: "Image tool",
-        currentValue: String(cfg.image.enabled),
-        values: ["true", "false"],
-        description: "Allow the openai_image tool to make image requests.",
-      },
-      {
-        id: "image.defaultModel",
-        label: "Image model",
-        currentValue: cfg.image.defaultModel,
-        values: ["gpt-5.5", "gpt-5.4", "gpt-5.2", "gpt-5"],
-        description:
-          "Mainline model used for image generation when current model is not openai-codex.",
-      },
-      {
-        id: "image.defaultSave",
-        label: "Image save",
-        currentValue: cfg.image.defaultSave,
-        values: [...IMAGE_SAVE_MODES],
-        description: "Where generated images are saved by default.",
-      },
-      {
-        id: "image.outputFormat",
-        label: "Image format",
-        currentValue: cfg.image.outputFormat,
-        values: [...IMAGE_OUTPUT_FORMATS],
-        description: "Generated image file format.",
-      },
-      {
-        id: "image.timeoutMs",
-        label: "Image timeout",
-        currentValue: String(cfg.image.timeoutMs),
-        values: ["30000", "60000", "120000", "180000", "300000"],
-        description: "Image request timeout in milliseconds.",
-      },
-    ];
+    return settingsItemsFromDescriptors(IMAGE_SETTING_DESCRIPTORS, cfg);
   }
 
   function buildDiagnosticsSettingsItems(

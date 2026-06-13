@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { _test } from "../index.ts";
 import {
+  SETTINGS_OPTION_DESCRIPTORS,
   applySettingToRawConfig,
   isRecord,
   readConfig,
@@ -175,6 +176,21 @@ describe("config helpers", () => {
       expect(resolved.pets.idleEmoteIntervalMs).toBe(5000);
       expect(resolved.pets.sizeCells).toBe(16);
     });
+  });
+
+  test("settings descriptors parse representative raw value types", () => {
+    const descriptors = new Map(
+      SETTINGS_OPTION_DESCRIPTORS.map((descriptor) => [descriptor.id, descriptor]),
+    );
+
+    expect(descriptors.get("usage.enabled")?.parse("true")).toBe(true);
+    expect(descriptors.get("usage.refreshIntervalMs")?.parse("15000")).toBe(15000);
+    expect(descriptors.get("footer.mode")?.parse("status")).toBe("status");
+    expect(
+      descriptors.get("pets.slug")?.parse("not selected", { petEmptyValue: "not selected" }),
+    ).toBe("");
+    expect(descriptors.get("pets.sizeCells")?.parse("12")).toBe(12);
+    expect(descriptors.get("image.timeoutMs")?.parse("45000")).toBe(45000);
   });
 
   test("applies settings writes with persisted raw config shapes", () => {
