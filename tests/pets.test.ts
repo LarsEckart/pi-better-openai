@@ -2,7 +2,7 @@ import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { resetCapabilitiesCache, setCapabilities, visibleWidth } from "@mariozechner/pi-tui";
 import sharp from "sharp";
 import { _test } from "../index.ts";
@@ -29,6 +29,8 @@ import {
 
 afterEach(() => {
   resetCapabilitiesCache();
+  _test.petsTest.clearPetCatalogCache();
+  vi.restoreAllMocks();
 });
 
 function firstKittyImageId(value: string): number | undefined {
@@ -315,6 +317,58 @@ describe("Codex pets helpers", () => {
         hasSpritesheet: false,
         spritesheetIssue: "spritesheet.webp must not be a symlink",
       });
+    });
+  });
+
+  test("reuses cached pet catalog metadata for repeated completions", async () => {
+    await withTempDir("pi-better-openai-pets-cache-", async (tempDir) => {
+      for (const slug of ["alpha", "beta"]) {
+        const petDir = join(tempDir, "pets", slug);
+        mkdirSync(petDir, { recursive: true });
+        writeFileSync(join(petDir, "pet.json"), JSON.stringify({ name: slug }));
+        await writeValidSpritesheet(join(petDir, "spritesheet.webp"));
+      }
+      const metadataSpy = vi.spyOn(sharp.prototype, "metadata");
+
+      await openAIPetsArgumentCompletions("wake ", tempDir);
+      await openAIPetsArgumentCompletions("wake a", tempDir);
+
+      expect(metadataSpy).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  test("loads a selected pet without validating unrelated pet spritesheets", async () => {
+    await withTempDir("pi-better-openai-pets-direct-load-", async (tempDir) => {
+      for (const slug of ["target", "other-one", "other-two"]) {
+        const petDir = join(tempDir, "pets", slug);
+        mkdirSync(petDir, { recursive: true });
+        writeFileSync(join(petDir, "pet.json"), JSON.stringify({ name: slug }));
+        await writeValidSpritesheet(join(petDir, "spritesheet.webp"));
+      }
+      const metadataSpy = vi.spyOn(sharp.prototype, "metadata");
+
+      const loaded = await loadCodexPet("target", tempDir);
+
+      expect(loaded?.pet.slug).toBe("target");
+      expect(metadataSpy).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  test("can refresh explicit pet listing diagnostics beyond the cache", async () => {
+    await withTempDir("pi-better-openai-pets-refresh-", async (tempDir) => {
+      const petDir = join(tempDir, "pets", "refresh-me");
+      mkdirSync(petDir, { recursive: true });
+      writeFileSync(join(petDir, "pet.json"), JSON.stringify({ name: "Refresh Me" }));
+
+      const first = await listCodexPets(tempDir);
+      expect(first[0]).toMatchObject({ hasSpritesheet: false });
+
+      await writeValidSpritesheet(join(petDir, "spritesheet.webp"));
+      const cached = await listCodexPets(tempDir);
+      expect(cached[0]).toMatchObject({ hasSpritesheet: false });
+
+      const refreshed = await listCodexPets(tempDir, { refresh: true });
+      expect(refreshed[0]).toMatchObject({ hasSpritesheet: true });
     });
   });
 

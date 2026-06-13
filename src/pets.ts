@@ -24,6 +24,16 @@ const DEFAULT_CELL_HEIGHT = 208;
 const DEFAULT_SPRITESHEET_PATH = "spritesheet.webp";
 const EXPECTED_ATLAS_WIDTH = DEFAULT_CELL_WIDTH * PET_COLUMNS;
 const EXPECTED_ATLAS_HEIGHT = DEFAULT_CELL_HEIGHT * PET_ROWS;
+const PET_CATALOG_CACHE_TTL_MS = 1500;
+
+type ListCodexPetsOptions = { refresh?: boolean };
+
+type PetCatalogCacheEntry = {
+  expiresAt: number;
+  pets: CodexPetPackage[];
+};
+
+const petCatalogCache = new Map<string, PetCatalogCacheEntry>();
 
 export const PET_ANIMATION_ROWS: Record<PetState, { row: number; durations: number[] }> = {
   idle: { row: 0, durations: [280, 110, 110, 140, 140, 320] },
@@ -201,48 +211,77 @@ async function validatePetSpritesheet(
   return undefined;
 }
 
-export async function listCodexPets(home = codexHome()): Promise<CodexPetPackage[]> {
-  const dir = codexPetsDir(home);
-  let entries: Dirent[];
-  try {
-    entries = await readdir(dir, { withFileTypes: true });
-  } catch {
-    return [];
+function clearPetCatalogCache(home?: string): void {
+  if (home === undefined) {
+    petCatalogCache.clear();
+    return;
   }
+  petCatalogCache.delete(resolve(home));
+}
 
+async function readPetDirectoryEntries(home: string): Promise<{ dir: string; entries: Dirent[] }> {
+  const dir = codexPetsDir(home);
+  try {
+    return { dir, entries: await readdir(dir, { withFileTypes: true }) };
+  } catch {
+    return { dir, entries: [] };
+  }
+}
+
+async function readCodexPetPackage(
+  petsDir: string,
+  entry: Dirent,
+  options: { validateSpritesheet: boolean },
+): Promise<CodexPetPackage | undefined> {
+  if (!entry.isDirectory()) return undefined;
+  const petDir = join(petsDir, entry.name);
+  const slug = sanitizePetSlug(entry.name);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(join(petDir, "pet.json"), "utf8")) as unknown;
+  } catch (error) {
+    return {
+      slug,
+      name: sanitizePetDisplayText(entry.name) ?? "Unnamed pet",
+      dir: petDir,
+      spritesheetPath: DEFAULT_SPRITESHEET_PATH,
+      hasSpritesheet: false,
+      spritesheetIssue: `invalid pet.json: ${formatSharpError(error)}`,
+    };
+  }
+  const { id, name, description, spritesheetPath } = petInfoFromJson(parsed, entry.name);
+  const spritesheetIssue = options.validateSpritesheet
+    ? await validatePetSpritesheet(petDir, spritesheetPath)
+    : undefined;
+  return {
+    slug,
+    id,
+    name,
+    description,
+    dir: petDir,
+    spritesheetPath,
+    hasSpritesheet: options.validateSpritesheet && spritesheetIssue === undefined,
+    spritesheetIssue,
+  };
+}
+
+export async function listCodexPets(
+  home = codexHome(),
+  options: ListCodexPetsOptions = {},
+): Promise<CodexPetPackage[]> {
+  const cacheKey = resolve(home);
+  const cached = petCatalogCache.get(cacheKey);
+  if (!options.refresh && cached && cached.expiresAt > Date.now()) return cached.pets;
+
+  const { dir, entries } = await readPetDirectoryEntries(home);
   const pets: CodexPetPackage[] = [];
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const petDir = join(dir, entry.name);
-    const slug = sanitizePetSlug(entry.name);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(await readFile(join(petDir, "pet.json"), "utf8")) as unknown;
-    } catch (error) {
-      pets.push({
-        slug,
-        name: sanitizePetDisplayText(entry.name) ?? "Unnamed pet",
-        dir: petDir,
-        spritesheetPath: DEFAULT_SPRITESHEET_PATH,
-        hasSpritesheet: false,
-        spritesheetIssue: `invalid pet.json: ${formatSharpError(error)}`,
-      });
-      continue;
-    }
-    const { id, name, description, spritesheetPath } = petInfoFromJson(parsed, entry.name);
-    const spritesheetIssue = await validatePetSpritesheet(petDir, spritesheetPath);
-    pets.push({
-      slug,
-      id,
-      name,
-      description,
-      dir: petDir,
-      spritesheetPath,
-      hasSpritesheet: spritesheetIssue === undefined,
-      spritesheetIssue,
-    });
+    const pet = await readCodexPetPackage(dir, entry, { validateSpritesheet: true });
+    if (pet) pets.push(pet);
   }
-  return pets.sort((a, b) => a.name.localeCompare(b.name));
+  pets.sort((a, b) => a.name.localeCompare(b.name));
+  petCatalogCache.set(cacheKey, { expiresAt: Date.now() + PET_CATALOG_CACHE_TTL_MS, pets });
+  return pets;
 }
 
 function petLookupKey(value: string): string {
@@ -385,13 +424,36 @@ function kittyImageBaseForPet(slug: string): number {
   return 0x50000000 + hash * 100;
 }
 
+async function findCodexPetDirect(
+  slug: string,
+  home: string,
+): Promise<CodexPetPackage | undefined> {
+  const request = petLookupRequest(slug);
+  if (!request.key) return undefined;
+  const { dir, entries } = await readPetDirectoryEntries(home);
+  for (const entry of entries) {
+    const candidate = await readCodexPetPackage(dir, entry, { validateSpritesheet: false });
+    if (!candidate || !petMatchesLookup(candidate, request.key)) continue;
+    if (candidate.spritesheetIssue) return candidate;
+    const spritesheetIssue = await validatePetSpritesheet(candidate.dir, candidate.spritesheetPath);
+    return {
+      ...candidate,
+      hasSpritesheet: spritesheetIssue === undefined,
+      spritesheetIssue,
+    };
+  }
+  return undefined;
+}
+
 export async function loadCodexPet(
   slug?: string,
   home = codexHome(),
   options: { sizeCells?: number } = {},
 ): Promise<LoadedCodexPet | undefined> {
-  const pet = selectPet(await listCodexPets(home), slug);
-  if (!pet) return undefined;
+  const pet = slug
+    ? await findCodexPetDirect(slug, home)
+    : selectPet(await listCodexPets(home), slug);
+  if (!pet?.hasSpritesheet) return undefined;
 
   const spritesheetPath = resolvePetAssetPath(pet.dir, pet.spritesheetPath);
   if (!spritesheetPath)
@@ -802,7 +864,7 @@ export function formatCodexPetsListMessage(pets: CodexPetPackage[], home = codex
 
 async function notifyPetsList(ctx: ExtensionContext): Promise<void> {
   const home = codexHome();
-  const pets = await listCodexPets(home);
+  const pets = await listCodexPets(home, { refresh: true });
   ctx.ui.notify(
     formatCodexPetsListMessage(pets, home),
     pets.some((pet) => pet.hasSpritesheet) ? "info" : "warning",
@@ -856,4 +918,5 @@ export const _petsTest = {
   findCodexPet,
   findReadyCodexPet,
   selectPet,
+  clearPetCatalogCache,
 };
