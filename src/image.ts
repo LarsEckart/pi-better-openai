@@ -6,8 +6,12 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import sharp from "sharp";
 import type { ResolvedConfig } from "./config.ts";
 import { isRecord } from "./config.ts";
+import {
+  extractAccountIdFromJwt,
+  getCodexCredentials,
+  type CodexCredentialsWithSource,
+} from "./codex-auth.ts";
 import { maskIdentifier, sanitizeDiagnosticError } from "./format.ts";
-import { readCodexAuth } from "./usage.ts";
 
 const OPENAI_IMAGE_TOOL = "openai_image";
 const OPENAI_IMAGE_COMMAND = "openai-image";
@@ -74,11 +78,7 @@ type ToolParams = {
   saveDir?: string;
 };
 
-type CodexImageCredentials = {
-  accessToken: string;
-  accountId: string;
-  source: "modelRegistry" | "authFile";
-};
+type CodexImageCredentials = CodexCredentialsWithSource;
 
 type ImageInput = {
   path: string;
@@ -116,65 +116,9 @@ export type ImageGenerationDebug = {
   lastError?: string;
 };
 
-function decodeBase64Url(value: string): string {
-  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
-  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
-  return Buffer.from(padded, "base64").toString("utf8");
-}
-
-export function extractAccountIdFromJwt(token: string): string | undefined {
-  try {
-    const [, payload] = token.split(".");
-    if (!payload) return undefined;
-    const parsed = JSON.parse(decodeBase64Url(payload)) as unknown;
-    if (!isRecord(parsed)) return undefined;
-    const auth = parsed["https://api.openai.com/auth"];
-    if (!isRecord(auth)) return undefined;
-    const accountId = auth.chatgpt_account_id;
-    return typeof accountId === "string" && accountId.trim() ? accountId.trim() : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function parseRegistryCredentials(
-  raw: string | undefined,
-): Omit<CodexImageCredentials, "source"> | undefined {
-  const value = raw?.trim();
-  if (!value) return undefined;
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    if (isRecord(parsed)) {
-      const accessToken =
-        typeof parsed.access === "string"
-          ? parsed.access
-          : typeof parsed.token === "string"
-            ? parsed.token
-            : undefined;
-      const accountId =
-        typeof parsed.accountId === "string"
-          ? parsed.accountId
-          : typeof parsed.account_id === "string"
-            ? parsed.account_id
-            : undefined;
-      if (accessToken?.trim() && accountId?.trim())
-        return { accessToken: accessToken.trim(), accountId: accountId.trim() };
-    }
-  } catch {
-    // Plain bearer token is expected for openai-codex in pi.
-  }
-  const accountId = extractAccountIdFromJwt(value);
-  return accountId ? { accessToken: value, accountId } : undefined;
-}
-
 async function getCredentials(ctx: ExtensionContext): Promise<CodexImageCredentials> {
-  const registryToken = await ctx.modelRegistry
-    .getApiKeyForProvider("openai-codex")
-    .catch(() => undefined);
-  const registryCredentials = parseRegistryCredentials(registryToken);
-  if (registryCredentials) return { ...registryCredentials, source: "modelRegistry" };
-  const auth = readCodexAuth();
-  if (auth) return { ...auth, source: "authFile" };
+  const credentials = await getCodexCredentials(ctx);
+  if (credentials) return credentials;
   throw new Error("Missing openai-codex OAuth credentials. Run /login openai-codex.");
 }
 

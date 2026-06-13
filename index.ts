@@ -366,7 +366,9 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   let usageTimer: ReturnType<typeof setInterval> | undefined;
   let footerTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
   let usageRefreshInFlight = false;
-  let queuedUsageRefresh: { ctx: ExtensionContext; modelId?: string; notify?: boolean } | undefined;
+  let queuedUsageRefresh:
+    | { ctx: ExtensionContext; modelId?: string; notify?: boolean; force?: boolean }
+    | undefined;
   let shuttingDown = false;
   let usageAbortController: AbortController | undefined;
   let footerInstalled = false;
@@ -764,11 +766,16 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   async function refreshUsage(
     ctx: ExtensionContext,
     modelId = ctx.model?.id,
-    options?: { notify?: boolean },
+    options?: { notify?: boolean; force?: boolean },
   ): Promise<void> {
     if (shuttingDown || !ctx.hasUI) return;
     if (usageRefreshInFlight) {
-      queuedUsageRefresh = { ctx, modelId, notify: queuedUsageRefresh?.notify || options?.notify };
+      queuedUsageRefresh = {
+        ctx,
+        modelId,
+        notify: queuedUsageRefresh?.notify || options?.notify,
+        force: queuedUsageRefresh?.force || options?.force,
+      };
       return;
     }
     usageRefreshInFlight = true;
@@ -778,9 +785,22 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
         usageSnapshot = undefined;
         usageError = "Usage display is disabled.";
         if (!shuttingDown) updateFooter(ctx);
+        if (!shuttingDown && options?.notify) ctx.ui.notify(formatUsageStatus(ctx), "warning");
         return;
       }
       if (!isOpenAISubscriptionModel(ctx, cfg)) {
+        if (!shuttingDown) updateFooter(ctx);
+        if (!shuttingDown && options?.notify) ctx.ui.notify(formatUsageStatus(ctx), "warning");
+        return;
+      }
+      const shouldThrottle =
+        !options?.force &&
+        !options?.notify &&
+        usageLastFetchAt !== undefined &&
+        Date.now() - usageLastFetchAt < cfg.usage.refreshIntervalMs &&
+        usageSnapshot !== undefined &&
+        usageError === undefined;
+      if (shouldThrottle) {
         if (!shuttingDown) updateFooter(ctx);
         return;
       }
@@ -789,7 +809,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       const signal = ctx.signal
         ? AbortSignal.any([ctx.signal, timeoutSignal, usageAbortController.signal])
         : AbortSignal.any([timeoutSignal, usageAbortController.signal]);
-      const data = await requestCodexUsage(signal);
+      const data = await requestCodexUsage(ctx, signal);
       usageLastFetchAt = Date.now();
       usageSnapshot = data ? parseUsageSnapshot(data, modelId) : undefined;
       usageUpdatedAt = usageSnapshot ? Date.now() : undefined;
@@ -808,7 +828,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       if (!shuttingDown && queuedUsageRefresh) {
         const next = queuedUsageRefresh;
         queuedUsageRefresh = undefined;
-        void refreshUsage(next.ctx, next.modelId, { notify: next.notify });
+        void refreshUsage(next.ctx, next.modelId, { notify: next.notify, force: next.force });
       }
     }
   }
@@ -817,7 +837,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     if (usageTimer) clearInterval(usageTimer);
     const cfg = config(ctx);
     if (!cfg.usage.enabled) return;
-    void refreshUsage(ctx);
+    void refreshUsage(ctx, undefined, { force: true });
     usageTimer = setInterval(() => void refreshUsage(ctx), cfg.usage.refreshIntervalMs);
     usageTimer.unref?.();
   }
@@ -897,11 +917,6 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     ].join("\n");
   }
 
-  function formatOpenAIStatus(ctx: ExtensionContext): string {
-    refresh(ctx);
-    return formatUsageStatus(ctx);
-  }
-
   pi.registerCommand(COMMAND, {
     description: "Toggle OpenAI fast mode",
     handler: async (args, ctx) => {
@@ -914,7 +929,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   pi.registerCommand(OPENAI_STATUS_COMMAND, {
     description: "Show OpenAI subscription usage status",
     handler: async (_args, ctx) => {
-      ctx.ui.notify(formatOpenAIStatus(ctx), "info");
+      await refreshUsage(ctx, ctx.model?.id, { notify: true, force: true });
     },
   });
 
@@ -2059,7 +2074,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       );
     }
     updateFooter(ctx);
-    void refreshUsage(ctx, event.model.id);
+    void refreshUsage(ctx, event.model.id, { force: true });
   });
 
   pi.on("session_shutdown", () => {

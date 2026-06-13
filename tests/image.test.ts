@@ -16,9 +16,19 @@ import { _test } from "../index.ts";
 import { registerOpenAIImage } from "../src/image.ts";
 import { makeResolvedConfig } from "./helpers.ts";
 
-vi.mock("../src/usage.ts", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../src/usage.ts")>();
-  return { ...actual, readCodexAuth: vi.fn(() => undefined) };
+vi.mock("../src/codex-auth.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/codex-auth.ts")>();
+  return {
+    ...actual,
+    readCodexAuth: vi.fn(() => undefined),
+    getCodexCredentials: vi.fn(async (ctx?: Pick<ExtensionContext, "modelRegistry">) => {
+      const registryToken = await ctx?.modelRegistry
+        ?.getApiKeyForProvider("openai-codex")
+        .catch(() => undefined);
+      const registryCredentials = actual.parseCodexRegistryCredentials(registryToken);
+      return registryCredentials ? { ...registryCredentials, source: "modelRegistry" } : undefined;
+    }),
+  };
 });
 
 type ToolExecute = (

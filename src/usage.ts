@@ -1,6 +1,6 @@
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { getCodexCredentials } from "./codex-auth.ts";
+export { AUTH_FILE, readCodexAuth } from "./codex-auth.ts";
 
 export type UsageWindow = {
   used_percent?: number | null;
@@ -28,8 +28,6 @@ export type UsageSnapshot = {
   isLimited: boolean;
 };
 
-const AGENT_DIR = process.env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), ".pi", "agent");
-export const AUTH_FILE = join(AGENT_DIR, "auth.json");
 export const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const SPARK_MODEL_ID = "gpt-5.3-codex-spark";
 const SPARK_LIMIT_NAME = "GPT-5.3-Codex-Spark";
@@ -86,32 +84,17 @@ function formatCompactReset(
   return countdown && clock ? `${label} ↺ ${countdown} - ${clock}` : null;
 }
 
-export function readCodexAuth(): { accessToken: string; accountId: string } | undefined {
-  try {
-    const auth = JSON.parse(readFileSync(AUTH_FILE, "utf8")) as Record<
-      string,
-      | {
-          type?: string;
-          access?: string | null;
-          accountId?: string | null;
-          account_id?: string | null;
-        }
-      | undefined
-    >;
-    const entry = auth["openai-codex"];
-    if (entry?.type !== "oauth") return undefined;
-    const accessToken = entry.access?.trim();
-    const accountId = (entry.accountId ?? entry.account_id)?.trim();
-    return accessToken && accountId ? { accessToken, accountId } : undefined;
-  } catch {
-    return undefined;
-  }
+function isAbortSignal(value: unknown): value is AbortSignal {
+  return typeof value === "object" && value !== null && "aborted" in value;
 }
 
 export async function requestCodexUsage(
+  ctxOrSignal?: ExtensionContext | AbortSignal,
   signal?: AbortSignal,
 ): Promise<CodexUsageResponse | undefined> {
-  const credentials = readCodexAuth();
+  const ctx = isAbortSignal(ctxOrSignal) ? undefined : ctxOrSignal;
+  const requestSignal = isAbortSignal(ctxOrSignal) ? ctxOrSignal : signal;
+  const credentials = await getCodexCredentials(ctx);
   if (!credentials) return undefined;
   const response = await fetch(USAGE_URL, {
     headers: {
@@ -119,7 +102,7 @@ export async function requestCodexUsage(
       authorization: `Bearer ${credentials.accessToken}`,
       "chatgpt-account-id": credentials.accountId,
     },
-    signal,
+    signal: requestSignal,
   });
   if (!response.ok) throw new Error(`Codex usage request failed (${response.status})`);
   return (await response.json()) as CodexUsageResponse;

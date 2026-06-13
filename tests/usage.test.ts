@@ -77,8 +77,14 @@ function usageResponseBody() {
   };
 }
 
-function stubUsageFetch(response: Response): ReturnType<typeof vi.fn> {
-  const fetchMock = vi.fn(() => Promise.resolve(response));
+function usageJsonResponse(): Response {
+  return new Response(JSON.stringify(usageResponseBody()));
+}
+
+function stubUsageFetch(response: Response | (() => Response)): ReturnType<typeof vi.fn> {
+  const fetchMock = vi.fn(() =>
+    Promise.resolve(typeof response === "function" ? response() : response),
+  );
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
 }
@@ -214,7 +220,7 @@ describe("requestCodexUsage", () => {
   test("reads isolated auth and sends usage fetch headers", async () => {
     const agentDir = createTempDir("pi-better-openai-usage-agent-");
     writeCodexAuth(agentDir);
-    const fetchMock = stubUsageFetch(new Response(JSON.stringify(usageResponseBody())));
+    const fetchMock = stubUsageFetch(usageJsonResponse());
     const usage = await importUsageWithAgentDir(agentDir);
 
     const response = await usage.requestCodexUsage();
@@ -229,9 +235,34 @@ describe("requestCodexUsage", () => {
     });
   });
 
+  test("uses refreshed model-registry credentials before auth-file fallback", async () => {
+    const agentDir = createTempDir("pi-better-openai-usage-agent-");
+    const fetchMock = stubUsageFetch(usageJsonResponse());
+    const usage = await importUsageWithAgentDir(agentDir);
+    const ctx = {
+      modelRegistry: {
+        getApiKeyForProvider: vi.fn(() =>
+          Promise.resolve(
+            JSON.stringify({ access: "registry-access", accountId: "acct_registry" }),
+          ),
+        ),
+      },
+    } as unknown as ExtensionContext;
+
+    const response = await usage.requestCodexUsage(ctx);
+
+    expect(response).toEqual(usageResponseBody());
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(ctx.modelRegistry.getApiKeyForProvider).toHaveBeenCalledWith("openai-codex");
+    expect(init.headers).toMatchObject({
+      authorization: "Bearer registry-access",
+      "chatgpt-account-id": "acct_registry",
+    });
+  });
+
   test("returns undefined without fetch when isolated auth is missing", async () => {
     const agentDir = createTempDir("pi-better-openai-usage-agent-");
-    const fetchMock = stubUsageFetch(new Response(JSON.stringify(usageResponseBody())));
+    const fetchMock = stubUsageFetch(usageJsonResponse());
     const usage = await importUsageWithAgentDir(agentDir);
 
     await expect(usage.requestCodexUsage()).resolves.toBeUndefined();
@@ -241,7 +272,7 @@ describe("requestCodexUsage", () => {
 
 describe("usage polling lifecycle", () => {
   test("does not fetch usage when usage display is disabled", async () => {
-    const fetchMock = stubUsageFetch(new Response(JSON.stringify(usageResponseBody())));
+    const fetchMock = stubUsageFetch(usageJsonResponse());
     const harness = await createUsageHarness({ usageConfig: { enabled: false } });
 
     await emit(harness, "session_start");
@@ -252,7 +283,7 @@ describe("usage polling lifecycle", () => {
   });
 
   test("does not fetch usage for non-OAuth subscription-gated models", async () => {
-    const fetchMock = stubUsageFetch(new Response(JSON.stringify(usageResponseBody())));
+    const fetchMock = stubUsageFetch(usageJsonResponse());
     const harness = await createUsageHarness({
       usageConfig: {
         enabled: true,
@@ -270,7 +301,7 @@ describe("usage polling lifecycle", () => {
   });
 
   test("fetches usage for OAuth OpenAI models and updates status text", async () => {
-    const fetchMock = stubUsageFetch(new Response(JSON.stringify(usageResponseBody())));
+    const fetchMock = stubUsageFetch(usageJsonResponse);
     const harness = await createUsageHarness({
       usageConfig: {
         enabled: true,
@@ -297,6 +328,50 @@ describe("usage polling lifecycle", () => {
     await emit(harness, "session_shutdown");
   });
 
+  test("throttles repeated turn-end refreshes within the configured interval", async () => {
+    const fetchMock = stubUsageFetch(usageJsonResponse);
+    const harness = await createUsageHarness({
+      usageConfig: {
+        enabled: true,
+        refreshIntervalMs: 60000,
+        showOnlyOnSubscriptionModels: true,
+      },
+      isUsingOAuth: true,
+    });
+
+    await emit(harness, "session_start");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await emit(harness, "turn_end");
+    await emit(harness, "turn_end");
+    await settleAsyncWork();
+    await emit(harness, "session_shutdown");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("forces refreshes for model selection and manual usage status", async () => {
+    const fetchMock = stubUsageFetch(usageJsonResponse);
+    const harness = await createUsageHarness({
+      usageConfig: {
+        enabled: true,
+        refreshIntervalMs: 60000,
+        showOnlyOnSubscriptionModels: true,
+      },
+      isUsingOAuth: true,
+    });
+
+    await emit(harness, "session_start");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    harness.ctx.model = { provider: "openai", id: "gpt-5.5" } as ExtensionContext["model"];
+    await emit(harness, "model_select", { model: harness.ctx.model });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await harness.commands.get("openai-usage")?.handler("", harness.ctx);
+    await emit(harness, "session_shutdown");
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(harness.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Usage:"), "info");
+  });
+
   test("surfaces usage fetch errors through /openai-usage", async () => {
     const fetchMock = stubUsageFetch(new Response("nope", { status: 500 }));
     const harness = await createUsageHarness({
@@ -313,9 +388,10 @@ describe("usage polling lifecycle", () => {
     await harness.commands.get("openai-usage")?.handler("", harness.ctx);
     await emit(harness, "session_shutdown");
 
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(harness.ctx.ui.notify).toHaveBeenCalledWith(
       expect.stringContaining("Codex usage request failed (500)"),
-      "info",
+      "warning",
     );
   });
 });
