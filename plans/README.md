@@ -8,7 +8,7 @@ This index tracks the GitHub issue-backed improvement plans for this repository.
 | 002: Characterize fast-mode provider injection                               | [#4](https://github.com/mattleong/pi-better-openai/issues/4)   | Done   |
 | 003: Add image tool integration tests with mocked Codex responses            | [#5](https://github.com/mattleong/pi-better-openai/issues/5)   | Done   |
 | 004: Harden `openai_image` local file inputs                                 | [#6](https://github.com/mattleong/pi-better-openai/issues/6)   | Done   |
-| 005: Redact image errors and debug identifiers                               | [#7](https://github.com/mattleong/pi-better-openai/issues/7)   | Open   |
+| 005: Redact image errors and debug identifiers                               | [#7](https://github.com/mattleong/pi-better-openai/issues/7)   | Done   |
 | 006: Wait for final image SSE results before returning                       | [#8](https://github.com/mattleong/pi-better-openai/issues/8)   | Open   |
 | 007: Harden Codex pet folder and asset boundaries                            | [#9](https://github.com/mattleong/pi-better-openai/issues/9)   | Open   |
 | 008: Add integration coverage for usage polling and status updates           | [#10](https://github.com/mattleong/pi-better-openai/issues/10) | Open   |

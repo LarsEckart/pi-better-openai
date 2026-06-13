@@ -6,6 +6,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import sharp from "sharp";
 import type { ResolvedConfig } from "./config.ts";
 import { isRecord } from "./config.ts";
+import { maskIdentifier, sanitizeDiagnosticError } from "./format.ts";
 import { readCodexAuth } from "./usage.ts";
 
 const OPENAI_IMAGE_TOOL = "openai_image";
@@ -429,13 +430,15 @@ async function parseSseForImage(
               isRecord(event.response) && isRecord(event.response.error)
                 ? event.response.error
                 : undefined;
-            const message =
-              typeof error?.message === "string" ? error.message : "Codex image request failed.";
+            const message = sanitizeDiagnosticError(
+              typeof error?.message === "string" ? error.message : "Codex image request failed.",
+            );
             throw new Error(message);
           }
           if (isRecord(event) && event.type === "error") {
-            const message =
-              typeof event.message === "string" ? event.message : JSON.stringify(event);
+            const message = sanitizeDiagnosticError(
+              typeof event.message === "string" ? event.message : JSON.stringify(event),
+            );
             throw new Error(`Codex image error: ${message}`);
           }
         }
@@ -479,10 +482,10 @@ async function requestCodexImage(
     signal,
   });
   if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(
-      `Codex image request failed (${response.status}): ${text || response.statusText}`,
-    );
+    const statusText = response.statusText
+      ? ` ${sanitizeDiagnosticError(response.statusText, 120)}`
+      : "";
+    throw new Error(`Codex image request failed (${response.status}${statusText}).`);
   }
   const parsed = await parseSseForImage(
     response,
@@ -566,7 +569,7 @@ export function registerOpenAIImage(
       return result;
     } catch (error) {
       lastStatus = "error";
-      lastError = error instanceof Error ? error.message : String(error);
+      lastError = sanitizeDiagnosticError(error instanceof Error ? error.message : String(error));
       throw error;
     }
   }
@@ -582,7 +585,7 @@ export function registerOpenAIImage(
     return {
       authFound: credentials !== undefined,
       authSource: credentials?.source,
-      accountId: credentials?.accountId,
+      accountId: maskIdentifier(credentials?.accountId),
       endpoint: CODEX_RESPONSES_URL,
       defaultModel: ctx.model?.provider === "openai-codex" ? ctx.model.id : cfg.image.defaultModel,
       defaultSave: cfg.image.defaultSave,

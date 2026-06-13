@@ -1,7 +1,21 @@
 import { describe, expect, test } from "vitest";
 import { _test } from "../index.ts";
+import { maskIdentifier, sanitizeDiagnosticError } from "../src/format.ts";
 
 describe("usage helpers", () => {
+  test("masks and sanitizes diagnostic identifiers", () => {
+    expect(maskIdentifier("acct_1234567890abcdef")).toBe("acct...cdef");
+
+    const sanitized = sanitizeDiagnosticError(
+      `\u001b[31mAuthorization: Bearer sk-secretsecret accountId=acct_1234567890abcdef ${"x".repeat(700)}`,
+    );
+
+    expect(sanitized).not.toContain("\u001b");
+    expect(sanitized).not.toContain("sk-secretsecret");
+    expect(sanitized).not.toContain("acct_1234567890abcdef");
+    expect(sanitized.length).toBeLessThanOrEqual(500);
+  });
+
   test("formats percentages", () => {
     expect(_test.formatPercent(99.4)).toBe("99%");
     expect(_test.formatPercent(null)).toBe("--");

@@ -139,6 +139,16 @@ async function executeImageTool(harness: ImageHarness, params: Record<string, un
   return harness.tool.execute("tool-call-1", params, undefined, vi.fn(), harness.ctx);
 }
 
+async function rejectedError(promise: Promise<unknown>): Promise<Error> {
+  try {
+    await promise;
+  } catch (error) {
+    if (error instanceof Error) return error;
+    throw new Error(`Expected Error rejection, received ${String(error)}`);
+  }
+  throw new Error("Expected promise to reject.");
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.clearAllMocks();
@@ -359,15 +369,57 @@ describe("openai_image tool execution", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  test("rejects non-OK Codex responses", async () => {
-    const fetchMock = stubFetch(new Response("upstream nope", { status: 500, statusText: "Nope" }));
+  test("redacts non-OK Codex response bodies from errors and debug state", async () => {
+    const secretBody = `Bearer sk-secretsecret accountId=acct_1234567890abcdef ${"x".repeat(700)}`;
+    const fetchMock = stubFetch(
+      new Response(secretBody, { status: 500, statusText: "Server Error" }),
+    );
     const harness = createImageHarness({
       registryCredentials: JSON.stringify({ access: "test-access", accountId: "acct_test" }),
     });
 
-    await expect(executeImageTool(harness, { prompt: "draw" })).rejects.toThrow(
-      "Codex image request failed (500)",
-    );
+    const error = await rejectedError(executeImageTool(harness, { prompt: "draw" }));
+    const debug = await harness.getDebug(harness.ctx);
+
+    expect(error.message).toBe("Codex image request failed (500 Server Error).");
+    expect(error.message).not.toContain("sk-secretsecret");
+    expect(error.message).not.toContain("acct_1234567890abcdef");
+    expect(debug.lastError).toBe(error.message);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("redacts and bounds SSE error messages", async () => {
+    const message = `bad\u001b[31m Bearer sk-secretsecret accountId=acct_1234567890abcdef ${"x".repeat(700)}`;
+    stubFetch(sseResponse([{ type: "error", message }]));
+    const harness = createImageHarness({
+      registryCredentials: JSON.stringify({ access: "test-access", accountId: "acct_test" }),
+    });
+
+    const error = await rejectedError(executeImageTool(harness, { prompt: "draw" }));
+    const debug = await harness.getDebug(harness.ctx);
+
+    expect(error.message).toContain("Codex image error: bad");
+    expect(error.message).not.toContain("\u001b");
+    expect(error.message).not.toContain("sk-secretsecret");
+    expect(error.message).not.toContain("acct_1234567890abcdef");
+    expect(error.message.length).toBeLessThanOrEqual(520);
+    expect(debug.lastError).toContain("Codex image error: bad");
+    expect(debug.lastError).not.toContain("sk-secretsecret");
+    expect(debug.lastError).not.toContain("acct_1234567890abcdef");
+    expect(debug.lastError?.length).toBeLessThanOrEqual(500);
+  });
+
+  test("masks image debug account identifiers", async () => {
+    const harness = createImageHarness({
+      registryCredentials: JSON.stringify({
+        access: "test-access",
+        accountId: "acct_1234567890abcdef",
+      }),
+    });
+
+    const debug = await harness.getDebug(harness.ctx);
+
+    expect(debug.accountId).toBe("acct...cdef");
+    expect(debug.accountId).not.toBe("acct_1234567890abcdef");
   });
 });

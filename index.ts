@@ -19,7 +19,13 @@ import {
   SettingsList,
 } from "@mariozechner/pi-tui";
 import { CONFIG_BASENAME, STATUS_KEY } from "./src/identity.ts";
-import { formatTokens, sanitizeStatusText, truncateToWidth, visibleWidth } from "./src/format.ts";
+import {
+  formatTokens,
+  maskIdentifier,
+  sanitizeStatusText,
+  truncateToWidth,
+  visibleWidth,
+} from "./src/format.ts";
 import {
   DEFAULT_CONFIG,
   DEFAULT_IMAGE_CONFIG,
@@ -837,7 +843,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       `Current model eligible: ${isOpenAISubscriptionModel(ctx, cfg)}`,
       `Requires subscription model: ${cfg.usage.showOnlyOnSubscriptionModels}`,
       `Auth: ${auth ? "found" : "missing"}`,
-      `Account ID: ${auth?.accountId ?? "none"}`,
+      `Account ID: ${maskIdentifier(auth?.accountId) ?? "none"}`,
       `Last fetch: ${usageLastFetchAt ? new Date(usageLastFetchAt).toLocaleTimeString() : "never"}`,
       `Last successful update: ${usageUpdatedAt ? new Date(usageUpdatedAt).toLocaleTimeString() : "never"}`,
       `Last error: ${usageError ?? "none"}`,
