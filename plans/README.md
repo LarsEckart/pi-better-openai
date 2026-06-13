@@ -5,7 +5,7 @@ This index tracks the GitHub issue-backed improvement plans for this repository.
 | Plan                                                                         | Issue                                                          | Status |
 | ---------------------------------------------------------------------------- | -------------------------------------------------------------- | ------ |
 | 001: Gate releases on the full local check suite                             | [#3](https://github.com/mattleong/pi-better-openai/issues/3)   | Done   |
-| 002: Characterize fast-mode provider injection                               | [#4](https://github.com/mattleong/pi-better-openai/issues/4)   | Open   |
+| 002: Characterize fast-mode provider injection                               | [#4](https://github.com/mattleong/pi-better-openai/issues/4)   | Done   |
 | 003: Add image tool integration tests with mocked Codex responses            | [#5](https://github.com/mattleong/pi-better-openai/issues/5)   | Open   |
 | 004: Harden `openai_image` local file inputs                                 | [#6](https://github.com/mattleong/pi-better-openai/issues/6)   | Open   |
 | 005: Redact image errors and debug identifiers                               | [#7](https://github.com/mattleong/pi-better-openai/issues/7)   | Open   |
