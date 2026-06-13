@@ -4,6 +4,7 @@
  * Adds `service_tier: "priority"` to OpenAI provider payloads while fast mode is
  * enabled and the selected model is in the configured allow-list.
  */
+import { sep } from "node:path";
 import {
   getSettingsListTheme,
   type ExtensionAPI,
@@ -98,6 +99,16 @@ type SettingsPickerItem = {
     done: (selectedValue?: string) => void,
   ) => { render(width: number): string[]; invalidate(): void; handleInput?(data: string): void };
 };
+
+function abbreviateHomePath(
+  path: string,
+  home = process.env.HOME || process.env.USERPROFILE,
+): string {
+  if (!home) return path;
+  if (path === home) return "~";
+  const homePrefix = home.endsWith(sep) ? home : `${home}${sep}`;
+  return path.startsWith(homePrefix) ? `~/${path.slice(homePrefix.length)}` : path;
+}
 
 function currentModelKey(ctx: ExtensionContext): string {
   return ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none";
@@ -1700,9 +1711,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
           const totalCacheWrite = footerTotals.cacheWrite;
           const totalCost = footerTotals.cost;
 
-          let pwd = ctx.sessionManager.getCwd();
-          const home = process.env.HOME || process.env.USERPROFILE;
-          if (home && pwd.startsWith(home)) pwd = `~${pwd.slice(home.length)}`;
+          let pwd = abbreviateHomePath(ctx.sessionManager.getCwd());
 
           const branch = footerData.getGitBranch?.();
           if (branch) pwd = `${pwd} (${branch})`;
@@ -2087,6 +2096,7 @@ export const _test = {
   DEFAULT_PET_CONFIG,
   SERVICE_TIER,
   configPaths,
+  abbreviateHomePath,
   parseModelKey,
   normalizeModelKeys,
   parseModels,

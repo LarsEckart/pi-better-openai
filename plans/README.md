@@ -17,7 +17,7 @@ This index tracks the GitHub issue-backed improvement plans for this repository.
 | 011: Align Node runtime and type declarations                                | [#13](https://github.com/mattleong/pi-better-openai/issues/13) | Done   |
 | 012: Cover settings writes and config precedence                             | [#14](https://github.com/mattleong/pi-better-openai/issues/14) | Done   |
 | 013: Document auth, config, image API, and contributor workflow              | [#15](https://github.com/mattleong/pi-better-openai/issues/15) | Done   |
-| 014: Fix footer home-path abbreviation boundary                              | [#16](https://github.com/mattleong/pi-better-openai/issues/16) | Open   |
+| 014: Fix footer home-path abbreviation boundary                              | [#16](https://github.com/mattleong/pi-better-openai/issues/16) | Done   |
 | 015: Cache pet discovery metadata and avoid unrelated pet validation on load | [#17](https://github.com/mattleong/pi-better-openai/issues/17) | Open   |
 | 016: Consolidate config and settings option metadata                         | [#18](https://github.com/mattleong/pi-better-openai/issues/18) | Open   |
 | 017: Extract feature controllers from the extension entry point              | [#19](https://github.com/mattleong/pi-better-openai/issues/19) | Open   |

@@ -104,6 +104,19 @@ afterEach(() => {
   }
 });
 
+describe("footer path formatting", () => {
+  test("abbreviates only exact home and child paths", () => {
+    expect(_test.abbreviateHomePath("/Users/alice/project", "/Users/alice")).toBe("~/project");
+    expect(_test.abbreviateHomePath("/Users/alice", "/Users/alice")).toBe("~");
+    expect(_test.abbreviateHomePath("/Users/alice2/project", "/Users/alice")).toBe(
+      "/Users/alice2/project",
+    );
+    expect(_test.abbreviateHomePath("/Users/alice/project", undefined)).toBe(
+      "/Users/alice/project",
+    );
+  });
+});
+
 describe("footer pet layout", () => {
   test("keeps terminal-image pets on the left for inline-left placement", () => {
     const imageLine = "\x1b[1A\x1b_Ga=p,i=1\x1b\\\x1b[1B";
