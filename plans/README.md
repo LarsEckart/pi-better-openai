@@ -11,7 +11,7 @@ This index tracks the GitHub issue-backed improvement plans for this repository.
 | 005: Redact image errors and debug identifiers                               | [#7](https://github.com/mattleong/pi-better-openai/issues/7)   | Done   |
 | 006: Wait for final image SSE results before returning                       | [#8](https://github.com/mattleong/pi-better-openai/issues/8)   | Done   |
 | 007: Harden Codex pet folder and asset boundaries                            | [#9](https://github.com/mattleong/pi-better-openai/issues/9)   | Done   |
-| 008: Add integration coverage for usage polling and status updates           | [#10](https://github.com/mattleong/pi-better-openai/issues/10) | Open   |
+| 008: Add integration coverage for usage polling and status updates           | [#10](https://github.com/mattleong/pi-better-openai/issues/10) | Done   |
 | 009: Refresh and throttle usage requests                                     | [#11](https://github.com/mattleong/pi-better-openai/issues/11) | Open   |
 | 010: Patch the high `fast-xml-builder` advisory in the peer tree             | [#12](https://github.com/mattleong/pi-better-openai/issues/12) | Open   |
 | 011: Align Node runtime and type declarations                                | [#13](https://github.com/mattleong/pi-better-openai/issues/13) | Open   |

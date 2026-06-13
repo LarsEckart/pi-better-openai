@@ -1,6 +1,175 @@
-import { describe, expect, test } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { _test } from "../index.ts";
 import { maskIdentifier, sanitizeDiagnosticError } from "../src/format.ts";
+
+type EventHandler = (event: unknown, ctx: ExtensionContext) => unknown | Promise<unknown>;
+type CommandHandler = (args: string, ctx: ExtensionContext) => unknown | Promise<unknown>;
+
+type UsageHarness = {
+  ctx: ExtensionContext;
+  handlers: Map<string, EventHandler[]>;
+  commands: Map<string, { handler: CommandHandler }>;
+};
+
+const tempDirs: string[] = [];
+const originalPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
+
+function createTempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+function writeCodexAuth(agentDir: string): void {
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(
+    join(agentDir, "auth.json"),
+    `${JSON.stringify(
+      {
+        "openai-codex": {
+          type: "oauth",
+          access: "usage-access",
+          accountId: "acct_usage",
+        },
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+}
+
+function writeProjectConfig(cwd: string, config: Record<string, unknown>): void {
+  const configDir = join(cwd, ".pi", "extensions");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(
+    join(configDir, "pi-better-openai.json"),
+    `${JSON.stringify(
+      {
+        persistState: false,
+        active: false,
+        desiredActive: false,
+        supportedModels: [],
+        usage: { enabled: true, refreshIntervalMs: 60000 },
+        footer: { mode: "status" },
+        image: { enabled: false },
+        pets: { enabled: false },
+        ...config,
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+}
+
+function usageResponseBody() {
+  return {
+    rate_limit: {
+      allowed: true,
+      primary_window: { used_percent: 10, reset_after_seconds: 60 },
+      secondary_window: { used_percent: 20, reset_after_seconds: 3600 },
+    },
+  };
+}
+
+function stubUsageFetch(response: Response): ReturnType<typeof vi.fn> {
+  const fetchMock = vi.fn(() => Promise.resolve(response));
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+async function importUsageWithAgentDir(agentDir: string) {
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  vi.resetModules();
+  return import("../src/usage.ts");
+}
+
+async function createUsageHarness(options: {
+  usageConfig?: Record<string, unknown>;
+  model?: ExtensionContext["model"];
+  isUsingOAuth?: boolean;
+  writeAuth?: boolean;
+}): Promise<UsageHarness> {
+  const cwd = createTempDir("pi-better-openai-usage-project-");
+  const agentDir = createTempDir("pi-better-openai-usage-agent-");
+  if (options.writeAuth !== false) writeCodexAuth(agentDir);
+  writeProjectConfig(cwd, {
+    usage: options.usageConfig ?? { enabled: true, refreshIntervalMs: 60000 },
+  });
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  vi.resetModules();
+  const { default: betterOpenAI } = await import("../index.ts");
+
+  const handlers = new Map<string, EventHandler[]>();
+  const commands = new Map<string, { handler: CommandHandler }>();
+  const pi = {
+    on(event: string, handler: EventHandler) {
+      const currentHandlers = handlers.get(event) ?? [];
+      currentHandlers.push(handler);
+      handlers.set(event, currentHandlers);
+    },
+    registerFlag: vi.fn(),
+    registerCommand: vi.fn((name: string, command: { handler: CommandHandler }) => {
+      commands.set(name, command);
+    }),
+    registerTool: vi.fn(),
+    registerMessageRenderer: vi.fn(),
+    sendMessage: vi.fn(),
+    getFlag: vi.fn(() => false),
+    getThinkingLevel: vi.fn(() => "off"),
+  } as unknown as ExtensionAPI;
+  const ctx = {
+    cwd,
+    hasUI: true,
+    signal: undefined,
+    model: options.model ?? { provider: "openai", id: "gpt-5.5" },
+    ui: {
+      notify: vi.fn(),
+      setFooter: vi.fn(),
+      setStatus: vi.fn(),
+    },
+    sessionManager: {
+      getEntries: vi.fn(() => []),
+      getCwd: vi.fn(() => cwd),
+      getSessionName: vi.fn(() => undefined),
+    },
+    modelRegistry: {
+      isUsingOAuth: vi.fn(() => options.isUsingOAuth ?? true),
+      getApiKeyForProvider: vi.fn(() => Promise.resolve(undefined)),
+    },
+    getContextUsage: vi.fn(() => ({ contextWindow: 0, percent: 0 })),
+  } as unknown as ExtensionContext;
+
+  betterOpenAI(pi);
+  return { ctx, handlers, commands };
+}
+
+async function emit(harness: UsageHarness, event: string, payload: unknown = {}): Promise<void> {
+  const handlers = harness.handlers.get(event) ?? [];
+  for (const handler of handlers) {
+    await handler(payload, harness.ctx);
+  }
+}
+
+async function settleAsyncWork(): Promise<void> {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.clearAllMocks();
+  vi.useRealTimers();
+  if (originalPiCodingAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = originalPiCodingAgentDir;
+  for (const tempDir of tempDirs.splice(0)) {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
 
 describe("usage helpers", () => {
   test("masks and sanitizes diagnostic identifiers", () => {
@@ -37,6 +206,116 @@ describe("usage helpers", () => {
     expect(usage.isLimited).toBe(false);
     expect(_test.formatUsageSnapshot(usage, { showResetTimes: false })).toMatch(
       /^Usage: 5h: 99% \| 7d: 51%$/,
+    );
+  });
+});
+
+describe("requestCodexUsage", () => {
+  test("reads isolated auth and sends usage fetch headers", async () => {
+    const agentDir = createTempDir("pi-better-openai-usage-agent-");
+    writeCodexAuth(agentDir);
+    const fetchMock = stubUsageFetch(new Response(JSON.stringify(usageResponseBody())));
+    const usage = await importUsageWithAgentDir(agentDir);
+
+    const response = await usage.requestCodexUsage();
+
+    expect(response).toEqual(usageResponseBody());
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(usage.USAGE_URL);
+    expect(init.headers).toMatchObject({
+      authorization: "Bearer usage-access",
+      "chatgpt-account-id": "acct_usage",
+    });
+  });
+
+  test("returns undefined without fetch when isolated auth is missing", async () => {
+    const agentDir = createTempDir("pi-better-openai-usage-agent-");
+    const fetchMock = stubUsageFetch(new Response(JSON.stringify(usageResponseBody())));
+    const usage = await importUsageWithAgentDir(agentDir);
+
+    await expect(usage.requestCodexUsage()).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("usage polling lifecycle", () => {
+  test("does not fetch usage when usage display is disabled", async () => {
+    const fetchMock = stubUsageFetch(new Response(JSON.stringify(usageResponseBody())));
+    const harness = await createUsageHarness({ usageConfig: { enabled: false } });
+
+    await emit(harness, "session_start");
+    await settleAsyncWork();
+    await emit(harness, "session_shutdown");
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("does not fetch usage for non-OAuth subscription-gated models", async () => {
+    const fetchMock = stubUsageFetch(new Response(JSON.stringify(usageResponseBody())));
+    const harness = await createUsageHarness({
+      usageConfig: {
+        enabled: true,
+        refreshIntervalMs: 60000,
+        showOnlyOnSubscriptionModels: true,
+      },
+      isUsingOAuth: false,
+    });
+
+    await emit(harness, "session_start");
+    await settleAsyncWork();
+    await emit(harness, "session_shutdown");
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("fetches usage for OAuth OpenAI models and updates status text", async () => {
+    const fetchMock = stubUsageFetch(new Response(JSON.stringify(usageResponseBody())));
+    const harness = await createUsageHarness({
+      usageConfig: {
+        enabled: true,
+        refreshIntervalMs: 60000,
+        showOnlyOnSubscriptionModels: true,
+        showResetTimes: false,
+      },
+      isUsingOAuth: true,
+    });
+
+    await emit(harness, "session_start");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(harness.ctx.ui.setStatus).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.stringContaining("Usage:"),
+      ),
+    );
+
+    expect(harness.ctx.ui.setStatus).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringContaining("5h: 90%"),
+    );
+    await emit(harness, "session_shutdown");
+  });
+
+  test("surfaces usage fetch errors through /openai-usage", async () => {
+    const fetchMock = stubUsageFetch(new Response("nope", { status: 500 }));
+    const harness = await createUsageHarness({
+      usageConfig: {
+        enabled: true,
+        refreshIntervalMs: 60000,
+        showOnlyOnSubscriptionModels: true,
+      },
+      isUsingOAuth: true,
+    });
+
+    await emit(harness, "session_start");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await harness.commands.get("openai-usage")?.handler("", harness.ctx);
+    await emit(harness, "session_shutdown");
+
+    expect(harness.ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Codex usage request failed (500)"),
+      "info",
     );
   });
 });
