@@ -14,7 +14,7 @@ This index tracks the GitHub issue-backed improvement plans for this repository.
 | 008: Add integration coverage for usage polling and status updates           | [#10](https://github.com/mattleong/pi-better-openai/issues/10) | Done   |
 | 009: Refresh and throttle usage requests                                     | [#11](https://github.com/mattleong/pi-better-openai/issues/11) | Done   |
 | 010: Patch the high `fast-xml-builder` advisory in the peer tree             | [#12](https://github.com/mattleong/pi-better-openai/issues/12) | Done   |
-| 011: Align Node runtime and type declarations                                | [#13](https://github.com/mattleong/pi-better-openai/issues/13) | Open   |
+| 011: Align Node runtime and type declarations                                | [#13](https://github.com/mattleong/pi-better-openai/issues/13) | Done   |
 | 012: Cover settings writes and config precedence                             | [#14](https://github.com/mattleong/pi-better-openai/issues/14) | Open   |
 | 013: Document auth, config, image API, and contributor workflow              | [#15](https://github.com/mattleong/pi-better-openai/issues/15) | Open   |
 | 014: Fix footer home-path abbreviation boundary                              | [#16](https://github.com/mattleong/pi-better-openai/issues/16) | Open   |
