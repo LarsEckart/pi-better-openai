@@ -1,5 +1,5 @@
 import { constants, type Dirent } from "node:fs";
-import { access, readdir, readFile, stat } from "node:fs/promises";
+import { access, lstat, readdir, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
@@ -105,6 +105,10 @@ function sanitizePetAssetPathField(value: unknown): string | undefined {
   return typeof value === "string" ? sanitizePetAssetPathText(value) : undefined;
 }
 
+function sanitizePetSlug(value: string): string {
+  return sanitizePetDisplayText(value) ?? "unnamed-pet";
+}
+
 export function codexHome(env = process.env, home = homedir()): string {
   return env.CODEX_HOME?.trim() || join(home, ".codex");
 }
@@ -132,11 +136,17 @@ function petInfoFromJson(
   return { id, name, description, spritesheetPath };
 }
 
+function isPathInsideDirectory(parent: string, child: string): boolean {
+  const resolvedParent = resolve(parent);
+  const resolvedChild = resolve(child);
+  const prefix = resolvedParent.endsWith(sep) ? resolvedParent : `${resolvedParent}${sep}`;
+  return resolvedChild === resolvedParent || resolvedChild.startsWith(prefix);
+}
+
 function resolvePetAssetPath(petDir: string, path: string): string | undefined {
   const resolvedPetDir = resolve(petDir);
   const resolved = resolve(resolvedPetDir, path);
-  const prefix = resolvedPetDir.endsWith(sep) ? resolvedPetDir : `${resolvedPetDir}${sep}`;
-  return resolved === resolvedPetDir || resolved.startsWith(prefix) ? resolved : undefined;
+  return isPathInsideDirectory(resolvedPetDir, resolved) ? resolved : undefined;
 }
 
 function formatSharpError(error: unknown): string {
@@ -156,12 +166,22 @@ async function validatePetSpritesheet(
 
   let fileStat;
   try {
-    fileStat = await stat(resolvedSpritesheetPath);
+    fileStat = await lstat(resolvedSpritesheetPath);
   } catch {
     return `missing ${spritesheetPath}`;
   }
 
+  if (fileStat.isSymbolicLink()) return `${spritesheetPath} must not be a symlink`;
   if (!fileStat.isFile()) return `${spritesheetPath} is not a file`;
+
+  const realPetDir = await realpath(petDir).catch(() => undefined);
+  const realSpritesheetPath = await realpath(resolvedSpritesheetPath).catch(() => undefined);
+  if (
+    !realPetDir ||
+    !realSpritesheetPath ||
+    !isPathInsideDirectory(realPetDir, realSpritesheetPath)
+  )
+    return `invalid spritesheetPath outside pet folder: ${spritesheetPath}`;
 
   try {
     await access(resolvedSpritesheetPath, constants.R_OK);
@@ -194,16 +214,25 @@ export async function listCodexPets(home = codexHome()): Promise<CodexPetPackage
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const petDir = join(dir, entry.name);
+    const slug = sanitizePetSlug(entry.name);
     let parsed: unknown;
     try {
       parsed = JSON.parse(await readFile(join(petDir, "pet.json"), "utf8")) as unknown;
-    } catch {
+    } catch (error) {
+      pets.push({
+        slug,
+        name: sanitizePetDisplayText(entry.name) ?? "Unnamed pet",
+        dir: petDir,
+        spritesheetPath: DEFAULT_SPRITESHEET_PATH,
+        hasSpritesheet: false,
+        spritesheetIssue: `invalid pet.json: ${formatSharpError(error)}`,
+      });
       continue;
     }
     const { id, name, description, spritesheetPath } = petInfoFromJson(parsed, entry.name);
     const spritesheetIssue = await validatePetSpritesheet(petDir, spritesheetPath);
     pets.push({
-      slug: entry.name,
+      slug,
       id,
       name,
       description,

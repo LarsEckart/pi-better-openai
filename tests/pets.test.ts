@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -145,13 +145,17 @@ describe("Codex pets helpers", () => {
       writeFileSync(join(petsDir, "broken", "spritesheet.webp"), "webp");
 
       const pets = await listCodexPets(tempDir);
-      expect(pets).toHaveLength(1);
-      expect(pets[0]).toMatchObject({
+      expect(pets).toHaveLength(2);
+      expect(pets.find((pet) => pet.slug === "stacky-plus")).toMatchObject({
         slug: "stacky-plus",
         name: "Stacky Plus",
         description: "A stack of helpful tokens.",
         id: "stacky-plus",
         hasSpritesheet: true,
+      });
+      expect(pets.find((pet) => pet.slug === "broken")).toMatchObject({
+        hasSpritesheet: false,
+        spritesheetIssue: expect.stringContaining("invalid pet.json"),
       });
       expect(_test.petsTest.selectPet(pets, "Stacky Plus")?.slug).toBe("stacky-plus");
       expect(_test.petsTest.selectPet(pets, "STACKY_PLUS")?.slug).toBe("stacky-plus");
@@ -179,6 +183,27 @@ describe("Codex pets helpers", () => {
     });
   });
 
+  test("reports custom pets with malformed pet.json as not ready", async () => {
+    await withTempDir("pi-better-openai-pets-json-", async (tempDir) => {
+      const petDir = join(tempDir, "pets", "bad-json");
+      mkdirSync(petDir, { recursive: true });
+      writeFileSync(join(petDir, "pet.json"), "{not json", "utf8");
+
+      const pets = await listCodexPets(tempDir);
+
+      expect(pets).toHaveLength(1);
+      expect(pets[0]).toMatchObject({
+        slug: "bad-json",
+        name: "bad-json",
+        hasSpritesheet: false,
+      });
+      expect(pets[0]?.spritesheetIssue).toContain("invalid pet.json");
+      expect(formatCodexPetsListMessage(pets, tempDir)).toContain(
+        "bad-json (bad-json) — invalid pet.json",
+      );
+    });
+  });
+
   test("reports custom pets that are missing spritesheets as not ready", async () => {
     await withTempDir("pi-better-openai-pets-broken-", async (tempDir) => {
       const petDir = join(tempDir, "pets", "ghost");
@@ -200,6 +225,25 @@ describe("Codex pets helpers", () => {
       expect(issue.short).toBe('Pet "Ghost" is not ready.');
       expect(issue.message).toContain("exists but is not ready");
       expect(issue.message).toContain("Problem: missing spritesheet.webp");
+    });
+  });
+
+  test("sanitizes control characters from displayed pet slugs", async () => {
+    await withTempDir("pi-better-openai-pets-slug-", async (tempDir) => {
+      const rawSlug = "bad\u001b[31m\nslug";
+      const petDir = join(tempDir, "pets", rawSlug);
+      mkdirSync(petDir, { recursive: true });
+      writeFileSync(join(petDir, "pet.json"), JSON.stringify({ name: "Bad Slug" }));
+      await writeValidSpritesheet(join(petDir, "spritesheet.webp"));
+
+      const pets = await listCodexPets(tempDir);
+      const message = formatCodexPetsListMessage(pets, tempDir);
+
+      expect(pets).toHaveLength(1);
+      expect(pets[0]?.slug).toBe("bad slug");
+      expect(message).toContain("Bad Slug (bad slug) — ready");
+      expect(message).not.toContain("\u001b");
+      expect(message).not.toContain("\nslug");
     });
   });
 
@@ -243,6 +287,34 @@ describe("Codex pets helpers", () => {
       expect(message).toContain(
         "Wrong Size (wrong-size) — invalid atlas dimensions: 1x1; expected 1536x1872",
       );
+    });
+  });
+
+  test("rejects symlinked spritesheets as not ready when the platform supports symlinks", async () => {
+    await withTempDir("pi-better-openai-pets-symlink-", async (tempDir) => {
+      const petsDir = join(tempDir, "pets");
+      const petDir = join(petsDir, "link-pet");
+      const outsideDir = join(tempDir, "outside");
+      mkdirSync(petDir, { recursive: true });
+      mkdirSync(outsideDir, { recursive: true });
+      writeFileSync(join(petDir, "pet.json"), JSON.stringify({ name: "Link Pet" }));
+      await writeValidSpritesheet(join(outsideDir, "spritesheet.webp"));
+      try {
+        symlinkSync(join(outsideDir, "spritesheet.webp"), join(petDir, "spritesheet.webp"));
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "EPERM" || code === "EACCES" || code === "ENOTSUP") return;
+        throw error;
+      }
+
+      const pets = await listCodexPets(tempDir);
+
+      expect(pets).toHaveLength(1);
+      expect(pets[0]).toMatchObject({
+        slug: "link-pet",
+        hasSpritesheet: false,
+        spritesheetIssue: "spritesheet.webp must not be a symlink",
+      });
     });
   });
 
