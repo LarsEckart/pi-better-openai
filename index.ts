@@ -10,23 +10,9 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
-import {
-  calculateImageRows,
-  Container,
-  getCapabilities,
-  getCellDimensions,
-  Key,
-  matchesKey,
-  SettingsList,
-} from "@mariozechner/pi-tui";
+import { Container, Key, matchesKey, SettingsList } from "@mariozechner/pi-tui";
 import { CONFIG_BASENAME, STATUS_KEY } from "./src/identity.ts";
-import {
-  formatTokens,
-  maskIdentifier,
-  sanitizeStatusText,
-  truncateToWidth,
-  visibleWidth,
-} from "./src/format.ts";
+import { formatTokens, sanitizeStatusText, truncateToWidth, visibleWidth } from "./src/format.ts";
 import {
   DEFAULT_CONFIG,
   DEFAULT_IMAGE_CONFIG,
@@ -43,7 +29,6 @@ import {
   type ResolvedConfig,
   type PetPlacement,
   type PetState,
-  type SupportedModel,
   isRecord,
   parseModelKey,
   normalizeModelKeys,
@@ -54,40 +39,30 @@ import {
   applySettingToRawConfig,
 } from "./src/config.ts";
 import {
-  AUTH_FILE,
-  type UsageSnapshot,
   formatPercent,
-  formatResetCountdown,
   formatUsageSnapshot,
   parseUsageSnapshot,
   readCodexAuth,
-  requestCodexUsage,
 } from "./src/usage.ts";
 import { registerOpenAIImage, _imageTest } from "./src/image.ts";
 import {
   type CodexPetPackage,
-  type LoadedCodexPet,
-  loadCodexPet,
-  animationFrameAt,
   codexHome,
   describeCodexPetSelectionIssue,
   findReadyCodexPet,
   formatNoReadyCodexPetsMessage,
   listCodexPets,
-  nextAnimationFrameDelayMs,
-  PET_ANIMATION_ROWS,
-  CodexPetKittyManager,
   registerOpenAIPets,
-  renderCodexPetFrame,
   _petsTest,
 } from "./src/pets.ts";
+import { FastController, modelList, supportsFast } from "./src/fast-controller.ts";
+import { UsageController } from "./src/usage-controller.ts";
+import { PetFooterController } from "./src/pet-footer-controller.ts";
 
 const COMMAND = "fast";
 const OPENAI_STATUS_COMMAND = "openai-usage";
 const OPENAI_SETTINGS_COMMAND = "openai-settings";
 const FLAG = "fast";
-const PET_RESIZE_FREEZE_MS = 120;
-const PET_RENDER_CACHE_LIMIT = 48;
 const PET_EMPTY_VALUE = "not selected";
 const SERVICE_TIER = "priority";
 type SettingsPickerItem = {
@@ -110,49 +85,6 @@ function abbreviateHomePath(
   if (path === home) return "~";
   const homePrefix = home.endsWith(sep) ? home : `${home}${sep}`;
   return path.startsWith(homePrefix) ? `~/${path.slice(homePrefix.length)}` : path;
-}
-
-function currentModelKey(ctx: ExtensionContext): string {
-  return ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none";
-}
-
-function supportsFast(ctx: ExtensionContext, supportedModels: SupportedModel[]): boolean {
-  const current = ctx.model;
-  if (!current) return false;
-  return supportedModels.some(
-    (model) => model.provider === current.provider && model.id === current.id,
-  );
-}
-
-function modelList(supportedModels: SupportedModel[]): string {
-  return supportedModels.length > 0
-    ? supportedModels.map((model) => `${model.provider}/${model.id}`).join(", ")
-    : "none configured";
-}
-
-function stateText(
-  ctx: ExtensionContext,
-  desiredActive: boolean,
-  active: boolean,
-  supportedModels: SupportedModel[],
-): string {
-  const model = currentModelKey(ctx);
-  if (active) return `Fast mode is on for ${model}.`;
-  if (desiredActive) {
-    return `Fast mode is requested, but inactive for unsupported model ${model}. Supported models: ${modelList(supportedModels)}.`;
-  }
-  return `Fast mode is off. Current model: ${model}.`;
-}
-
-function isOpenAISubscriptionModel(ctx: ExtensionContext, cfg: ResolvedConfig): boolean {
-  if (!ctx.model || (ctx.model.provider !== "openai" && ctx.model.provider !== "openai-codex"))
-    return false;
-  return !cfg.usage.showOnlyOnSubscriptionModels || ctx.modelRegistry.isUsingOAuth(ctx.model);
-}
-
-function randomIdleEmoteState(idleState: PetState, random = Math.random): PetState {
-  const candidates = (["waving", "jumping"] as const).filter((state) => state !== idleState);
-  return candidates[Math.floor(random() * candidates.length)] ?? "waving";
 }
 
 function isInlinePetPlacement(placement: PetPlacement): boolean {
@@ -313,111 +245,14 @@ function combineInlinePetFooter(
   return lines;
 }
 
-function petFrameInfo(pet: LoadedCodexPet, state: PetState, elapsedMs: number) {
-  const frames = pet.states[state] ?? pet.states.idle;
-  const frame = animationFrameAt(frames, elapsedMs);
-  return { frame, frameIndex: frame ? frames.indexOf(frame) : -1 };
-}
-
-function petFrameRows(
-  pet: LoadedCodexPet,
-  state: PetState,
-  elapsedMs: number,
-  width: number,
-  sizeCells: number,
-): number {
-  const { frame } = petFrameInfo(pet, state, elapsedMs);
-  if (!frame || !getCapabilities().images) return 0;
-  const columns = Math.max(1, Math.min(Math.max(1, width - 2), sizeCells));
-  return calculateImageRows(
-    { widthPx: frame.widthPx, heightPx: frame.heightPx },
-    columns,
-    getCellDimensions(),
-  );
-}
-
-function petPlaceholderLines(
-  pet: LoadedCodexPet,
-  state: PetState,
-  elapsedMs: number,
-  width: number,
-  sizeCells: number,
-): string[] {
-  return Array.from({ length: petFrameRows(pet, state, elapsedMs, width, sizeCells) }, () => "");
-}
-
-function petRenderCacheKey(
-  pet: LoadedCodexPet,
-  state: PetState,
-  frameIndex: number,
-  placement: PetPlacement,
-  width: number,
-  sizeCells: number,
-): string {
-  const cellDimensions = getCellDimensions();
-  const imageProtocol = getCapabilities().images ?? "none";
-  return [
-    pet.pet.slug,
-    state,
-    frameIndex,
-    placement,
-    width,
-    sizeCells,
-    imageProtocol,
-    cellDimensions.widthPx,
-    cellDimensions.heightPx,
-  ].join(":");
-}
-
 export default function betterOpenAI(pi: ExtensionAPI): void {
-  let desiredActive = false;
-  let active = false;
+  const fastController = new FastController(SERVICE_TIER);
   let cachedConfig: ResolvedConfig | undefined;
-  let usageSnapshot: UsageSnapshot | undefined;
-  let usageUpdatedAt: number | undefined;
-  let usageError: string | undefined;
-  let usageLastFetchAt: number | undefined;
-  let usageTimer: ReturnType<typeof setInterval> | undefined;
   let footerTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
-  let usageRefreshInFlight = false;
-  let queuedUsageRefresh:
-    | { ctx: ExtensionContext; modelId?: string; notify?: boolean; force?: boolean }
-    | undefined;
-  let shuttingDown = false;
-  let usageAbortController: AbortController | undefined;
   let footerInstalled = false;
   let statusInstalled = false;
-  let requestFooterRender: (() => void) | undefined;
-  let requestSettingsRender: (() => void) | undefined;
-  let lastInjectedAt: number | undefined;
-  let lastInjectedModel: string | undefined;
-  let lastInjectedTier: string | undefined;
-  let pet: LoadedCodexPet | undefined;
-  let petError: string | undefined;
-  let petLoadKey: string | undefined;
-  let petLoadInFlight = false;
-  let petLoadingKey: string | undefined;
-  let petLoadNotify = false;
-  let queuedPetRefresh: { ctx: ExtensionContext; notify: boolean } | undefined;
-  let petTimer: ReturnType<typeof setTimeout> | undefined;
-  let petRenderRequestTimer: ReturnType<typeof setTimeout> | undefined;
-  let petRuntimeState: PetState = "idle";
-  let petPreviewState: PetState | undefined;
-  let petSettingsPreviewActive = false;
-  let petSettingsPets: CodexPetPackage[] = [];
-  let petFlashState: PetState | undefined;
-  let petFlashUntil: number | undefined;
-  let petFlashTimer: ReturnType<typeof setTimeout> | undefined;
-  let petIdleEmoteTimer: ReturnType<typeof setTimeout> | undefined;
-  let petResizeTimer: ReturnType<typeof setTimeout> | undefined;
-  let petResizeFreezeUntil = 0;
-  let stdoutResizeHandler: (() => void) | undefined;
-  let petAnimationState: PetState | undefined;
-  let petAnimationStartedAt = Date.now();
-  const petRenderCache = new Map<string, string[]>();
-  const activeToolCallIds = new Set<string>();
-  const petImageId = 0x70657401;
-  const petKittyManager = new CodexPetKittyManager(petImageId);
+  const usageController = new UsageController(config, updateFooter);
+  const petController = new PetFooterController(config, updateFooter, () => footerInstalled);
 
   function refresh(ctx: ExtensionContext): ResolvedConfig {
     cachedConfig = resolveConfig(ctx.cwd || process.cwd());
@@ -429,323 +264,17 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   }
 
   function persist(nextConfig: ResolvedConfig): void {
-    cachedConfig = { ...nextConfig, active, desiredActive };
+    cachedConfig = {
+      ...nextConfig,
+      active: fastController.active,
+      desiredActive: fastController.desiredActive,
+    };
     if (!nextConfig.persistState) return;
     writeConfig(nextConfig.configPath, {
       ...readRawConfig(nextConfig.configPath),
-      active,
-      desiredActive,
+      active: fastController.active,
+      desiredActive: fastController.desiredActive,
     });
-  }
-
-  function shouldLoadPetForConfig(cfg: ResolvedConfig): boolean {
-    return cfg.pets.enabled || petSettingsPreviewActive;
-  }
-
-  function shouldRenderPetInFooter(cfg: ResolvedConfig): boolean {
-    return cfg.pets.enabled || (petSettingsPreviewActive && footerInstalled);
-  }
-
-  function setPetSettingsPreviewActive(ctx: ExtensionContext, next: boolean): void {
-    if (petSettingsPreviewActive === next) return;
-    petSettingsPreviewActive = next;
-    if (!config(ctx).pets.enabled) petLoadKey = undefined;
-    void refreshPet(ctx, config(ctx)).then(() => {
-      if (!shouldRenderPetInFooter(config(ctx))) flushPetKittyCleanupNow();
-      requestSettingsRender?.();
-    });
-    updateFooter(ctx);
-  }
-
-  function petStateAnimationDurationMs(state: PetState): number {
-    return PET_ANIMATION_ROWS[state].durations.reduce((sum, duration) => sum + duration, 0);
-  }
-
-  function clearPetFlash(): void {
-    if (petFlashTimer) clearTimeout(petFlashTimer);
-    petFlashTimer = undefined;
-    petFlashState = undefined;
-    petFlashUntil = undefined;
-    petAnimationState = undefined;
-  }
-
-  function stopPetIdleEmotes(): void {
-    if (petIdleEmoteTimer) clearTimeout(petIdleEmoteTimer);
-    petIdleEmoteTimer = undefined;
-  }
-
-  function resetPetRenderCache(): void {
-    petRenderCache.clear();
-  }
-
-  function queuePetKittyCleanup(target = pet): void {
-    petKittyManager.invalidate(target);
-  }
-
-  function takePetKittyCleanupSequence(): string {
-    return petKittyManager.takeCleanupSequence();
-  }
-
-  function withPendingPetKittyCleanup(lines: string[]): string[] {
-    const sequence = takePetKittyCleanupSequence();
-    if (!sequence) return lines;
-    if (lines.length === 0) return [sequence];
-    return [`${sequence}\x1b[0m${lines[0]}\x1b[0m`, ...lines.slice(1)];
-  }
-
-  function writePetKittySequence(sequence: string): void {
-    if (sequence && process.stdout.isTTY) process.stdout.write(sequence);
-  }
-
-  function flushPetKittyCleanupNow(): void {
-    writePetKittySequence(takePetKittyCleanupSequence());
-  }
-
-  function disposePetKittyNow(target = pet): void {
-    writePetKittySequence(petKittyManager.dispose(target));
-  }
-
-  function rememberPetRender(key: string, lines: string[]): void {
-    petRenderCache.set(key, lines);
-    while (petRenderCache.size > PET_RENDER_CACHE_LIMIT) {
-      const firstKey = petRenderCache.keys().next().value;
-      if (firstKey === undefined) break;
-      petRenderCache.delete(firstKey);
-    }
-  }
-
-  function petResizeFrozen(now = Date.now()): boolean {
-    return now < petResizeFreezeUntil;
-  }
-
-  function clearPetResizeFreeze(): void {
-    if (petResizeTimer) clearTimeout(petResizeTimer);
-    petResizeTimer = undefined;
-    petResizeFreezeUntil = 0;
-  }
-
-  function freezePetForResize(ctx: ExtensionContext, now = Date.now()): void {
-    petResizeFreezeUntil = now + PET_RESIZE_FREEZE_MS;
-    queuePetKittyCleanup();
-    stopPetAnimation();
-    stopPetIdleEmotes();
-    stopPendingPetRenderRequest();
-    if (petResizeTimer) clearTimeout(petResizeTimer);
-    petResizeTimer = setTimeout(() => {
-      petResizeTimer = undefined;
-      petResizeFreezeUntil = 0;
-      petKittyManager.resetForResize(pet);
-      resetPetRenderCache();
-      updateFooter(ctx);
-    }, PET_RESIZE_FREEZE_MS);
-    petResizeTimer.unref?.();
-  }
-
-  function installPetResizeGuard(ctx: ExtensionContext): void {
-    if (stdoutResizeHandler || !process.stdout.isTTY) return;
-    stdoutResizeHandler = () => freezePetForResize(ctx);
-    process.stdout.on("resize", stdoutResizeHandler);
-  }
-
-  function uninstallPetResizeGuard(): void {
-    if (stdoutResizeHandler) process.stdout.off("resize", stdoutResizeHandler);
-    stdoutResizeHandler = undefined;
-    clearPetResizeFreeze();
-  }
-
-  function currentPetState(ctx: ExtensionContext, cfg = config(ctx)): PetState {
-    if (petPreviewState) return petPreviewState;
-    const now = Date.now();
-    if (petFlashState && petFlashUntil !== undefined && now < petFlashUntil) return petFlashState;
-    if (petFlashState) clearPetFlash();
-    return petRuntimeState === "idle" ? cfg.pets.state : petRuntimeState;
-  }
-
-  function currentPetAnimation(ctx: ExtensionContext, cfg = config(ctx)) {
-    const state = currentPetState(ctx, cfg);
-    const now = Date.now();
-    if (state !== petAnimationState) {
-      petAnimationState = state;
-      petAnimationStartedAt = now;
-    }
-    return { state, elapsedMs: now - petAnimationStartedAt };
-  }
-
-  function stopPetAnimation(): void {
-    if (petTimer) clearTimeout(petTimer);
-    petTimer = undefined;
-  }
-
-  function stopPendingPetRenderRequest(): void {
-    if (petRenderRequestTimer) clearTimeout(petRenderRequestTimer);
-    petRenderRequestTimer = undefined;
-  }
-
-  function requestPetFooterRender(): void {
-    if (petRenderRequestTimer) return;
-    petRenderRequestTimer = setTimeout(() => {
-      petRenderRequestTimer = undefined;
-      requestFooterRender?.();
-      requestSettingsRender?.();
-    }, 16);
-    petRenderRequestTimer.unref?.();
-  }
-
-  function schedulePetAnimation(ctx: ExtensionContext): void {
-    if (!pet || petTimer || petResizeFrozen() || !getCapabilities().images) return;
-    const { state, elapsedMs } = currentPetAnimation(ctx);
-    const frames = pet.states[state] ?? pet.states.idle;
-    petTimer = setTimeout(
-      () => {
-        petTimer = undefined;
-        if (petResizeFrozen()) return;
-        requestPetFooterRender();
-        schedulePetAnimation(ctx);
-      },
-      nextAnimationFrameDelayMs(frames, elapsedMs),
-    );
-    petTimer.unref?.();
-  }
-
-  function startPetAnimation(ctx: ExtensionContext): void {
-    schedulePetAnimation(ctx);
-    void refreshPet(ctx);
-  }
-
-  function shouldRunIdleEmotes(ctx: ExtensionContext, cfg = config(ctx)): boolean {
-    return (
-      cfg.pets.enabled &&
-      cfg.pets.idleEmotes &&
-      getCapabilities().images !== null &&
-      pet !== undefined &&
-      petRuntimeState === "idle" &&
-      activeToolCallIds.size === 0 &&
-      petPreviewState === undefined &&
-      !petSettingsPreviewActive &&
-      petFlashState === undefined &&
-      !petResizeFrozen()
-    );
-  }
-
-  function playPetFlash(ctx: ExtensionContext, state: PetState, cfg = config(ctx)): void {
-    if (!cfg.pets.enabled || !getCapabilities().images) return;
-    clearPetFlash();
-    const durationMs = petStateAnimationDurationMs(state);
-    petFlashState = state;
-    petFlashUntil = Date.now() + durationMs;
-    petFlashTimer = setTimeout(() => {
-      petFlashTimer = undefined;
-      petFlashState = undefined;
-      petFlashUntil = undefined;
-      petAnimationState = undefined;
-      updateFooter(ctx);
-    }, durationMs);
-    petFlashTimer.unref?.();
-    updateFooter(ctx);
-  }
-
-  function schedulePetIdleEmote(ctx: ExtensionContext, cfg = config(ctx)): void {
-    if (petIdleEmoteTimer || !shouldRunIdleEmotes(ctx, cfg)) return;
-    const delayMs = Math.round(cfg.pets.idleEmoteIntervalMs * (0.75 + Math.random() * 0.75));
-    petIdleEmoteTimer = setTimeout(() => {
-      petIdleEmoteTimer = undefined;
-      const nextConfig = config(ctx);
-      if (shouldRunIdleEmotes(ctx, nextConfig)) {
-        playPetFlash(ctx, randomIdleEmoteState(nextConfig.pets.state), nextConfig);
-      }
-      schedulePetIdleEmote(ctx, nextConfig);
-    }, delayMs);
-    petIdleEmoteTimer.unref?.();
-  }
-
-  function petLoadKeyForConfig(cfg: ResolvedConfig): string {
-    const cellDimensions = getCellDimensions();
-    return [
-      cfg.pets.slug || "__first__",
-      cfg.pets.sizeCells,
-      getCapabilities().images ?? "none",
-      cellDimensions.widthPx,
-      cellDimensions.heightPx,
-    ].join(":");
-  }
-
-  async function refreshPet(
-    ctx: ExtensionContext,
-    cfg = config(ctx),
-    notify = false,
-  ): Promise<void> {
-    if (shuttingDown) return;
-    if (!shouldLoadPetForConfig(cfg)) {
-      queuedPetRefresh = undefined;
-      queuePetKittyCleanup();
-      pet = undefined;
-      petError = undefined;
-      petLoadKey = undefined;
-      resetPetRenderCache();
-      clearPetFlash();
-      stopPetIdleEmotes();
-      stopPetAnimation();
-      return;
-    }
-
-    const key = petLoadKeyForConfig(cfg);
-    if (petLoadKey === key) return;
-    if (petLoadInFlight) {
-      if (petLoadingKey === key) petLoadNotify ||= notify;
-      else queuedPetRefresh = { ctx, notify: queuedPetRefresh?.notify || notify };
-      return;
-    }
-
-    petLoadInFlight = true;
-    petLoadingKey = key;
-    petLoadNotify = notify;
-    petError = undefined;
-    const previousPet = pet;
-
-    function shouldApplyLoadResult(): boolean {
-      if (shuttingDown || queuedPetRefresh) return false;
-      const latestConfig = config(ctx);
-      return shouldLoadPetForConfig(latestConfig) && petLoadKeyForConfig(latestConfig) === key;
-    }
-
-    try {
-      const loadedPet = await loadCodexPet(cfg.pets.slug || undefined, undefined, {
-        sizeCells: cfg.pets.sizeCells,
-      });
-      if (!shouldApplyLoadResult()) return;
-      if (previousPet) queuePetKittyCleanup(previousPet);
-      pet = loadedPet;
-      const petIssue = pet
-        ? undefined
-        : describeCodexPetSelectionIssue(await listCodexPets(), cfg.pets.slug || undefined);
-      petAnimationState = undefined;
-      resetPetRenderCache();
-      petLoadKey = key;
-      if (!pet && petIssue) petError = petIssue.short;
-      if (petLoadNotify) {
-        ctx.ui.notify(
-          pet
-            ? `Rendering ${pet.pet.name} in the Better OpenAI footer.`
-            : (petIssue?.message ?? "No ready custom Codex pet found."),
-          pet ? "info" : "warning",
-        );
-      }
-    } catch (error) {
-      if (!shouldApplyLoadResult()) return;
-      if (previousPet) queuePetKittyCleanup(previousPet);
-      pet = undefined;
-      petLoadKey = key;
-      petError = error instanceof Error ? error.message : String(error);
-      if (petLoadNotify) ctx.ui.notify(`Could not render Codex pet: ${petError}`, "warning");
-    } finally {
-      petLoadInFlight = false;
-      petLoadingKey = undefined;
-      petLoadNotify = false;
-      const queued = queuedPetRefresh;
-      queuedPetRefresh = undefined;
-      if (queued && !shuttingDown) void refreshPet(queued.ctx, config(queued.ctx), queued.notify);
-      if (!shuttingDown) updateFooter(ctx);
-    }
   }
 
   function writePetConfig(ctx: ExtensionContext, patch: Record<string, unknown>): ResolvedConfig {
@@ -753,107 +282,20 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     const current = readRawConfig(cfg.configPath);
     const pets = isRecord(current.pets) ? current.pets : {};
     writeConfig(cfg.configPath, { ...current, pets: { ...pets, ...patch } });
-    petLoadKey = undefined;
+    petController.invalidateLoadKey();
     return refresh(ctx);
-  }
-
-  function applyDesiredFastState(ctx: ExtensionContext, cfg = config(ctx)): void {
-    active = desiredActive && supportsFast(ctx, cfg.supportedModels);
   }
 
   function setActive(ctx: ExtensionContext, next: boolean): void {
     const nextConfig = refresh(ctx);
-    desiredActive = next;
-    applyDesiredFastState(ctx, nextConfig);
+    fastController.setDesired(ctx, nextConfig, next);
     persist(nextConfig);
     updateFooter(ctx);
-    if (next && !active) {
-      ctx.ui.notify(
-        `Fast mode requested, but ${currentModelKey(ctx)} is unsupported. It will activate automatically when you switch to a supported model: ${modelList(nextConfig.supportedModels)}.`,
-        "warning",
-      );
+    if (next && !fastController.active) {
+      ctx.ui.notify(fastController.unsupportedRequestMessage(ctx, nextConfig), "warning");
       return;
     }
-    ctx.ui.notify(stateText(ctx, desiredActive, active, nextConfig.supportedModels), "info");
-  }
-
-  async function refreshUsage(
-    ctx: ExtensionContext,
-    modelId = ctx.model?.id,
-    options?: { notify?: boolean; force?: boolean },
-  ): Promise<void> {
-    if (shuttingDown || !ctx.hasUI) return;
-    if (usageRefreshInFlight) {
-      queuedUsageRefresh = {
-        ctx,
-        modelId,
-        notify: queuedUsageRefresh?.notify || options?.notify,
-        force: queuedUsageRefresh?.force || options?.force,
-      };
-      return;
-    }
-    usageRefreshInFlight = true;
-    const cfg = config(ctx);
-    try {
-      if (!cfg.usage.enabled) {
-        usageSnapshot = undefined;
-        usageError = "Usage display is disabled.";
-        if (!shuttingDown) updateFooter(ctx);
-        if (!shuttingDown && options?.notify) ctx.ui.notify(formatUsageStatus(ctx), "warning");
-        return;
-      }
-      if (!isOpenAISubscriptionModel(ctx, cfg)) {
-        if (!shuttingDown) updateFooter(ctx);
-        if (!shuttingDown && options?.notify) ctx.ui.notify(formatUsageStatus(ctx), "warning");
-        return;
-      }
-      const shouldThrottle =
-        !options?.force &&
-        !options?.notify &&
-        usageLastFetchAt !== undefined &&
-        Date.now() - usageLastFetchAt < cfg.usage.refreshIntervalMs &&
-        usageSnapshot !== undefined &&
-        usageError === undefined;
-      if (shouldThrottle) {
-        if (!shuttingDown) updateFooter(ctx);
-        return;
-      }
-      usageAbortController = new AbortController();
-      const timeoutSignal = AbortSignal.timeout(10_000);
-      const signal = ctx.signal
-        ? AbortSignal.any([ctx.signal, timeoutSignal, usageAbortController.signal])
-        : AbortSignal.any([timeoutSignal, usageAbortController.signal]);
-      const data = await requestCodexUsage(ctx, signal);
-      usageLastFetchAt = Date.now();
-      usageSnapshot = data ? parseUsageSnapshot(data, modelId) : undefined;
-      usageUpdatedAt = usageSnapshot ? Date.now() : undefined;
-      usageError = data ? undefined : `Missing openai-codex OAuth credentials in ${AUTH_FILE}.`;
-      if (!shuttingDown) updateFooter(ctx);
-      if (!shuttingDown && options?.notify)
-        ctx.ui.notify(formatUsageStatus(ctx), usageSnapshot ? "info" : "warning");
-    } catch (error) {
-      if (shuttingDown) return;
-      usageError = error instanceof Error ? error.message : String(error);
-      updateFooter(ctx);
-      if (options?.notify) ctx.ui.notify(formatUsageStatus(ctx), "warning");
-    } finally {
-      usageAbortController = undefined;
-      usageRefreshInFlight = false;
-      if (!shuttingDown && queuedUsageRefresh) {
-        const next = queuedUsageRefresh;
-        queuedUsageRefresh = undefined;
-        void refreshUsage(next.ctx, next.modelId, { notify: next.notify, force: next.force });
-      }
-    }
-  }
-
-  function startUsageRefresh(ctx: ExtensionContext): void {
-    if (usageTimer) clearInterval(usageTimer);
-    const cfg = config(ctx);
-    if (!cfg.usage.enabled) return;
-    void refreshUsage(ctx, undefined, { force: true });
-    usageTimer = setInterval(() => void refreshUsage(ctx), cfg.usage.refreshIntervalMs);
-    usageTimer.unref?.();
+    ctx.ui.notify(fastController.stateText(ctx, nextConfig), "info");
   }
 
   function refreshFooterTotals(ctx: ExtensionContext): void {
@@ -868,37 +310,6 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     }
   }
 
-  function formatUsageDebug(ctx: ExtensionContext): string {
-    const cfg = config(ctx);
-    const auth = readCodexAuth();
-    return [
-      `Usage enabled: ${cfg.usage.enabled}`,
-      `Current model: ${currentModelKey(ctx)}`,
-      `Current model eligible: ${isOpenAISubscriptionModel(ctx, cfg)}`,
-      `Requires subscription model: ${cfg.usage.showOnlyOnSubscriptionModels}`,
-      `Auth: ${auth ? "found" : "missing"}`,
-      `Account ID: ${maskIdentifier(auth?.accountId) ?? "none"}`,
-      `Last fetch: ${usageLastFetchAt ? new Date(usageLastFetchAt).toLocaleTimeString() : "never"}`,
-      `Last successful update: ${usageUpdatedAt ? new Date(usageUpdatedAt).toLocaleTimeString() : "never"}`,
-      `Last error: ${usageError ?? "none"}`,
-      `Refresh interval: ${cfg.usage.refreshIntervalMs}ms`,
-      `Endpoint: https://chatgpt.com/backend-api/wham/usage`,
-    ].join("\n");
-  }
-
-  function formatUsageStatus(ctx: ExtensionContext): string {
-    const cfg = config(ctx);
-    if (!cfg.usage.enabled) return "Usage display is disabled.";
-    if (!isOpenAISubscriptionModel(ctx, cfg))
-      return "Usage hidden: current model is not an OpenAI subscription model.";
-    if (!usageSnapshot) return `Usage unavailable${usageError ? `: ${usageError}` : "."}`;
-    const stale =
-      usageUpdatedAt && Date.now() - usageUpdatedAt > cfg.usage.refreshIntervalMs * 2
-        ? ` | stale ${formatResetCountdown((Date.now() - usageUpdatedAt) / 1000)}`
-        : "";
-    return `${formatUsageSnapshot(usageSnapshot, cfg.usage)}${stale}`;
-  }
-
   pi.registerFlag(FLAG, {
     description: "Start with OpenAI fast mode enabled (service_tier=priority)",
     type: "boolean",
@@ -908,15 +319,10 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   function formatDebugStatus(ctx: ExtensionContext): string {
     const cfg = config(ctx);
     return [
-      `Fast desired: ${desiredActive}`,
-      `Fast active: ${active}`,
-      `Current model: ${currentModelKey(ctx)}`,
-      `Supported model: ${supportsFast(ctx, cfg.supportedModels)}`,
-      `Configured service_tier: ${SERVICE_TIER}`,
-      `Last injected: ${lastInjectedAt ? `${new Date(lastInjectedAt).toLocaleTimeString()} (${lastInjectedModel}, ${lastInjectedTier})` : "never"}`,
+      ...fastController.debugLines(ctx, cfg),
       `Footer mode: ${cfg.footer.mode}`,
       "",
-      formatUsageDebug(ctx),
+      usageController.formatDebug(ctx),
       "",
       `Image enabled: ${cfg.image.enabled}`,
       `Image default save: ${cfg.image.defaultSave}`,
@@ -925,8 +331,8 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       `Pet placement: ${cfg.pets.placement}`,
       `Pet failed tool state: ${cfg.pets.failedToolState}`,
       `Pet idle emotes: ${cfg.pets.idleEmotes} (${cfg.pets.idleEmoteIntervalMs}ms)`,
-      `Pet loaded: ${pet?.pet.name ?? "none"}`,
-      `Pet error: ${petError ?? "none"}`,
+      `Pet loaded: ${petController.loadedPet?.pet.name ?? "none"}`,
+      `Pet error: ${petController.error ?? "none"}`,
       `Config: ${cfg.configPath}`,
     ].join("\n");
   }
@@ -935,7 +341,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     description: "Toggle OpenAI fast mode",
     handler: async (args, ctx) => {
       const arg = args.trim().toLowerCase();
-      if (!arg) return setActive(ctx, !desiredActive);
+      if (!arg) return setActive(ctx, !fastController.desiredActive);
       ctx.ui.notify("Usage: /fast", "error");
     },
   });
@@ -943,7 +349,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   pi.registerCommand(OPENAI_STATUS_COMMAND, {
     description: "Show OpenAI subscription usage status",
     handler: async (_args, ctx) => {
-      await refreshUsage(ctx, ctx.model?.id, { notify: true, force: true });
+      await usageController.refresh(ctx, ctx.model?.id, { notify: true, force: true });
     },
   });
 
@@ -964,8 +370,8 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     return settingsItemsFromDescriptors(PET_SETTING_DESCRIPTORS, cfg, {
       "pets.slug": {
         currentValue: petConfigPickerValue(cfg),
-        values: readyPetPickerValues(petSettingsPets),
-        description: petPickerDescription(cfg, petSettingsPets),
+        values: readyPetPickerValues(petController.settingsPets),
+        description: petPickerDescription(cfg, petController.settingsPets),
       },
     });
   }
@@ -983,23 +389,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   }
 
   function renderPetSettingsPreview(ctx: ExtensionContext, width: number): string[] {
-    if (!petSettingsPreviewActive || shouldRenderPetInFooter(config(ctx))) return [];
-    if (!pet) {
-      return [petError ? `Preview unavailable: ${petError}` : "Preview: loading pet…"];
-    }
-    const cfg = config(ctx);
-    const { state, elapsedMs } = currentPetAnimation(ctx, cfg);
-    const plainTheme = { fg: (_color: string, value: string) => value };
-    return [
-      `Preview: ${pet.pet.name}`,
-      ...renderCodexPetFrame(pet, state, width, plainTheme, {
-        sizeCells: cfg.pets.sizeCells,
-        imageId: petImageId,
-        now: elapsedMs,
-        durationMultiplier: 1,
-        kittyManager: petKittyManager,
-      }),
-    ];
+    return petController.renderSettingsPreview(ctx, width);
   }
 
   function settingsSubmenu(
@@ -1174,10 +564,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   }
 
   function fastSettingsSummary(ctx: ExtensionContext, cfg: ResolvedConfig): string {
-    if (active) return "on";
-    if (desiredActive)
-      return supportsFast(ctx, cfg.supportedModels) ? "requested" : "requested inactive";
-    return "off";
+    return fastController.settingsSummary(ctx, cfg);
   }
 
   function usageSettingsSummary(cfg: ResolvedConfig): string {
@@ -1229,7 +616,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       {
         id: "fast.enabled",
         label: "Fast mode",
-        currentValue: String(desiredActive),
+        currentValue: String(fastController.desiredActive),
         values: ["true", "false"],
         description: `Request OpenAI fast mode. Activates for supported models: ${modelList(cfg.supportedModels)}.`,
       },
@@ -1343,7 +730,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
         currentValue: petSettingsSummary(cfg),
         description: "Configure footer pet visibility, animation-state mapping, and size.",
         submenu: (_value, done) => {
-          setPetSettingsPreviewActive(ctx, true);
+          petController.setSettingsPreviewActive(ctx, true);
           return settingsSubmenu(
             "Footer pet settings",
             () => buildPetSettingsItems(config(ctx)),
@@ -1352,14 +739,14 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
             {
               onSelection: (item) => {
                 const previewState = petPreviewFromItem(item);
-                if (previewState !== petPreviewState) {
-                  petPreviewState = previewState;
+                if (previewState !== petController.previewState) {
+                  petController.setPreviewState(previewState);
                   updateFooter(ctx);
                 }
               },
               onClose: () => {
-                petPreviewState = undefined;
-                setPetSettingsPreviewActive(ctx, false);
+                petController.setPreviewState(undefined);
+                petController.setSettingsPreviewActive(ctx, false);
                 updateFooter(ctx);
               },
               renderExtra: (width) => renderPetSettingsPreview(ctx, width),
@@ -1388,48 +775,42 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     const current = readRawConfig(cfg.configPath);
     const bool = rawValue === "true";
     if (id === "fast.enabled") {
-      desiredActive = bool;
-      applyDesiredFastState(ctx, cfg);
+      fastController.setDesired(ctx, cfg, bool);
     }
     const petKey = id.startsWith("pets.") ? id.slice("pets.".length) : undefined;
     const nextRawConfig = applySettingToRawConfig(current, id, rawValue, {
       persistState: cfg.persistState,
-      active,
-      desiredActive,
+      active: fastController.active,
+      desiredActive: fastController.desiredActive,
       petEmptyValue: PET_EMPTY_VALUE,
     });
     if (petKey) {
       if (petKey === "enabled" || petKey === "sizeCells" || petKey === "slug")
-        petLoadKey = undefined;
+        petController.invalidateLoadKey();
       if (petKey === "placement" || petKey === "sizeCells" || petKey === "slug")
-        resetPetRenderCache();
-      if (petKey === "idleEmotes" || petKey === "idleEmoteIntervalMs") stopPetIdleEmotes();
+        petController.resetRenderCache();
+      if (petKey === "idleEmotes" || petKey === "idleEmoteIntervalMs")
+        petController.stopIdleEmotes();
     }
     writeConfig(cfg.configPath, nextRawConfig);
     const next = refresh(ctx);
     if (id === "pets.enabled" || id === "pets.sizeCells" || id === "pets.slug")
-      void refreshPet(ctx, next);
+      void petController.refresh(ctx, next);
     if (id.startsWith("usage.")) {
-      if (usageTimer) clearInterval(usageTimer);
-      usageTimer = undefined;
-      if (next.usage.enabled) startUsageRefresh(ctx);
-      else {
-        usageSnapshot = undefined;
-        usageError = "Usage display is disabled.";
-      }
+      usageController.restartAfterSettingsChange(ctx, next);
     }
     updateFooter(ctx);
   }
 
   async function showSettingsPicker(ctx: ExtensionContext): Promise<void> {
     try {
-      petSettingsPets = await listCodexPets();
+      petController.settingsPets = await listCodexPets();
     } catch {
-      petSettingsPets = [];
+      petController.settingsPets = [];
     }
     try {
       await ctx.ui.custom((tui, theme, _kb, done) => {
-        requestSettingsRender = () => tui.requestRender();
+        petController.setSettingsRenderRequest(() => tui.requestRender());
         const container = new Container();
         container.addChild(
           new (class {
@@ -1475,12 +856,10 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
         };
       });
     } finally {
-      requestSettingsRender = undefined;
-      if (petPreviewState !== undefined || petSettingsPreviewActive) {
-        petPreviewState = undefined;
-        setPetSettingsPreviewActive(ctx, false);
-        updateFooter(ctx);
-      }
+      petController.setSettingsRenderRequest(undefined);
+      petController.setPreviewState(undefined);
+      petController.setSettingsPreviewActive(ctx, false);
+      updateFooter(ctx);
     }
   }
 
@@ -1508,17 +887,11 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
         slug: selectedPet.slug,
       });
       updateFooter(ctx);
-      await refreshPet(ctx, next, true);
+      await petController.refresh(ctx, next, true);
     },
     tuck: (ctx) => {
       writePetConfig(ctx, { enabled: false });
-      queuePetKittyCleanup();
-      pet = undefined;
-      petError = undefined;
-      resetPetRenderCache();
-      clearPetFlash();
-      stopPetIdleEmotes();
-      stopPetAnimation();
+      petController.tuck();
       updateFooter(ctx);
       ctx.ui.notify("Footer pet tucked away.", "info");
     },
@@ -1539,7 +912,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
 
       const next = writePetConfig(ctx, { slug: selectedPet.slug });
       updateFooter(ctx);
-      if (shouldLoadPetForConfig(next)) await refreshPet(ctx, next, true);
+      if (petController.shouldLoadForConfig(next)) await petController.refresh(ctx, next, true);
       else {
         ctx.ui.notify(
           `Selected ${selectedPet.name} (${selectedPet.slug}) for the footer pet. Use /pets wake to show it.`,
@@ -1551,36 +924,36 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
 
   function installFooter(ctx: ExtensionContext): void {
     if (footerInstalled) {
-      requestFooterRender?.();
+      petController.requestFooterRenderNow();
       return;
     }
     footerInstalled = true;
     ctx.ui.setFooter((tui, theme, footerData) => {
-      requestFooterRender = () => tui.requestRender();
+      petController.setFooterRenderRequest(() => tui.requestRender());
       const unsubscribe = footerData.onBranchChange?.(() => tui.requestRender());
       let lastFooterSizeKey: string | undefined;
       return {
         dispose: () => {
           unsubscribe?.();
-          stopPetIdleEmotes();
-          stopPetAnimation();
-          stopPendingPetRenderRequest();
-          disposePetKittyNow();
+          petController.stopIdleEmotes();
+          petController.stopAnimation();
+          petController.stopPendingRenderRequest();
+          petController.disposeKittyNow();
           footerInstalled = false;
-          requestFooterRender = undefined;
+          petController.setFooterRenderRequest(undefined);
         },
         invalidate() {
-          queuePetKittyCleanup();
-          resetPetRenderCache();
+          petController.queueKittyCleanup();
+          petController.resetRenderCache();
         },
         render(width: number): string[] {
           const now = Date.now();
           const footerSizeKey = `${width}:${process.stdout.rows ?? 0}`;
           if (lastFooterSizeKey !== undefined && lastFooterSizeKey !== footerSizeKey) {
-            freezePetForResize(ctx, now);
+            petController.freezeForResize(ctx, now);
           }
           lastFooterSizeKey = footerSizeKey;
-          const freezePetFrame = petResizeFrozen(now);
+          const freezePetFrame = petController.isResizeFrozen(now);
 
           const totalInput = footerTotals.input;
           const totalOutput = footerTotals.output;
@@ -1625,7 +998,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
 
           const cfg = config(ctx);
           const cfgForPets = cfg;
-          const shouldRenderPet = shouldRenderPetInFooter(cfgForPets);
+          const shouldRenderPet = petController.shouldRenderInFooter(cfgForPets);
           const requestedPetPlacement = cfgForPets.pets.placement;
           const requestedPetSizeCells = petSizeCellsForPlacement(
             requestedPetPlacement,
@@ -1633,7 +1006,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
           );
           const inlinePet = Boolean(
             shouldRenderPet &&
-            pet &&
+            petController.loadedPet &&
             isInlinePetPlacement(requestedPetPlacement) &&
             width >= requestedPetSizeCells + 32,
           );
@@ -1641,10 +1014,8 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
           const petColumnWidth = Math.min(petRenderSizeCells, Math.max(1, width - 1));
           const footerTextWidth = inlinePet ? Math.max(1, width - petColumnWidth - 2) : width;
 
-          let usageLine: string | undefined;
-          if (usageSnapshot && cfg.usage.enabled && isOpenAISubscriptionModel(ctx, cfg)) {
-            usageLine = theme.fg("dim", formatUsageSnapshot(usageSnapshot, cfg.usage));
-          }
+          const usageStatusLine = usageController.statusLine(ctx, cfg);
+          const usageLine = usageStatusLine ? theme.fg("dim", usageStatusLine) : undefined;
 
           let statsLeft = parts.join(" ");
           let statsLeftWidth = visibleWidth(statsLeft);
@@ -1656,7 +1027,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
           const modelName = ctx.model?.id || "no-model";
           const thinkingLevel = pi.getThinkingLevel();
           const fastSuffix =
-            active && supportsFast(ctx, config(ctx).supportedModels) ? " fast" : "";
+            fastController.active && supportsFast(ctx, config(ctx).supportedModels) ? " fast" : "";
           let rightWithoutProvider = modelName;
           if (ctx.model?.reasoning) {
             rightWithoutProvider =
@@ -1713,65 +1084,21 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
             textLines.push(truncateToWidth(statusLine, footerTextWidth, theme.fg("dim", "...")));
           }
 
-          const petLines: string[] = [];
-          if (shouldRenderPet) {
-            if (pet) {
-              const { state: petState, elapsedMs } = currentPetAnimation(ctx, cfgForPets);
-              if (freezePetFrame) {
-                petLines.push(
-                  ...petPlaceholderLines(
-                    pet,
-                    petState,
-                    elapsedMs,
-                    petColumnWidth,
-                    petRenderSizeCells,
-                  ),
-                );
-              } else {
-                const { frameIndex } = petFrameInfo(pet, petState, elapsedMs);
-                const cacheKey = petRenderCacheKey(
-                  pet,
-                  petState,
-                  frameIndex,
-                  requestedPetPlacement,
-                  petColumnWidth,
-                  petRenderSizeCells,
-                );
-                const cachedPetLines = petRenderCache.get(cacheKey);
-                const imageProtocol = getCapabilities().images;
-                if (cachedPetLines) {
-                  petLines.push(...cachedPetLines);
-                } else {
-                  const renderedPetLines = renderCodexPetFrame(
-                    pet,
-                    petState,
-                    petColumnWidth,
-                    theme,
-                    {
-                      sizeCells: petRenderSizeCells,
-                      imageId: petImageId,
-                      now: elapsedMs,
-                      durationMultiplier: 1,
-                      kittyManager: petKittyManager,
-                    },
-                  );
-                  petLines.push(...renderedPetLines);
-                  if (renderedPetLines.length > 0) {
-                    if (imageProtocol !== null && imageProtocol !== "kitty")
-                      rememberPetRender(cacheKey, renderedPetLines);
-                  }
-                }
-              }
-            } else if (petError) {
-              petLines.push(truncateToWidth(theme.fg("warning", `pet: ${petError}`), width, "..."));
-            }
-          }
+          const petLines = petController.renderPetLines(ctx, cfgForPets, {
+            shouldRenderPet,
+            freezePetFrame,
+            requestedPetPlacement,
+            petColumnWidth,
+            petRenderSizeCells,
+            width,
+            theme,
+          });
 
           if (!shouldRenderPet || petLines.length === 0)
-            return withPendingPetKittyCleanup(textLines);
+            return petController.withPendingKittyCleanup(textLines);
 
           if (inlinePet) {
-            return withPendingPetKittyCleanup(
+            return petController.withPendingKittyCleanup(
               combineInlinePetFooter(
                 petLines,
                 textLines,
@@ -1782,16 +1109,16 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
             );
           }
 
-          if (requestedPetPlacement === "habitat" && pet) {
-            const label = ` ${pet.pet.name} `;
+          if (requestedPetPlacement === "habitat" && petController.loadedPet) {
+            const label = ` ${petController.loadedPet.pet.name} `;
             const divider = theme.fg(
               "dim",
               truncateToWidth(`─${label}${"─".repeat(width)}`, width, ""),
             );
-            return withPendingPetKittyCleanup([divider, ...petLines, ...textLines]);
+            return petController.withPendingKittyCleanup([divider, ...petLines, ...textLines]);
           }
 
-          return withPendingPetKittyCleanup([...petLines, ...textLines]);
+          return petController.withPendingKittyCleanup([...petLines, ...textLines]);
         },
       };
     });
@@ -1799,10 +1126,10 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
 
   function clearFooter(ctx: ExtensionContext): void {
     if (!footerInstalled) return;
-    disposePetKittyNow();
+    petController.disposeKittyNow();
     ctx.ui.setFooter(undefined);
     footerInstalled = false;
-    requestFooterRender = undefined;
+    petController.setFooterRenderRequest(undefined);
   }
 
   function setStatus(ctx: ExtensionContext, text: string | undefined): void {
@@ -1813,13 +1140,8 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
 
   function updateFooter(ctx: ExtensionContext): void {
     const cfg = config(ctx);
-    const resizeFrozen = petResizeFrozen();
-    const shouldAnimatePet = shouldLoadPetForConfig(cfg);
-    const shouldRenderPet = shouldRenderPetInFooter(cfg);
-    stopPetAnimation();
-    if (shouldAnimatePet && !resizeFrozen) startPetAnimation(ctx);
-    if (!resizeFrozen && shouldRunIdleEmotes(ctx, cfg)) schedulePetIdleEmote(ctx, cfg);
-    else stopPetIdleEmotes();
+    petController.updateActivity(ctx, cfg);
+    const shouldRenderPet = petController.shouldRenderInFooter(cfg);
 
     if (cfg.footer.mode === "replace" || shouldRenderPet) {
       setStatus(ctx, undefined);
@@ -1834,134 +1156,94 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       return;
     }
 
-    const fast =
-      active && supportsFast(ctx, cfg.supportedModels)
-        ? `${ctx.model?.id ?? "model"} fast`
-        : undefined;
-    const usage =
-      usageSnapshot && cfg.usage.enabled && isOpenAISubscriptionModel(ctx, cfg)
-        ? formatUsageSnapshot(usageSnapshot, cfg.usage)
-        : undefined;
+    const fast = fastController.statusSegment(ctx, cfg);
+    const usage = usageController.statusLine(ctx, cfg);
     setStatus(ctx, [fast, usage].filter(Boolean).join(" | ") || undefined);
   }
 
   pi.on("session_start", (_event, ctx) => {
     const nextConfig = refresh(ctx);
-    desiredActive = nextConfig.persistState ? nextConfig.desiredActive : false;
-    if (pi.getFlag(FLAG) === true) desiredActive = true;
-    applyDesiredFastState(ctx, nextConfig);
-    if (desiredActive !== nextConfig.desiredActive || active !== nextConfig.active)
+    fastController.initializeForSession(ctx, nextConfig, pi.getFlag(FLAG) === true);
+    if (
+      fastController.desiredActive !== nextConfig.desiredActive ||
+      fastController.active !== nextConfig.active
+    )
       persist(nextConfig);
-    if (desiredActive && !active) {
-      ctx.ui.notify(
-        `Fast mode requested, but ${currentModelKey(ctx)} is unsupported. It will activate automatically when you switch to a supported model: ${modelList(nextConfig.supportedModels)}.`,
-        "warning",
-      );
+    if (fastController.desiredActive && !fastController.active) {
+      ctx.ui.notify(fastController.unsupportedRequestMessage(ctx, nextConfig), "warning");
     }
-    installPetResizeGuard(ctx);
+    petController.installResizeGuard(ctx);
     refreshFooterTotals(ctx);
     updateFooter(ctx);
-    if (nextConfig.pets.enabled) void refreshPet(ctx, nextConfig);
-    startUsageRefresh(ctx);
-    if (active)
-      ctx.ui.notify(stateText(ctx, desiredActive, active, nextConfig.supportedModels), "info");
+    if (nextConfig.pets.enabled) void petController.refresh(ctx, nextConfig);
+    usageController.start(ctx);
+    if (fastController.active) ctx.ui.notify(fastController.stateText(ctx, nextConfig), "info");
   });
 
   pi.on("agent_start", (_event, ctx) => {
-    activeToolCallIds.clear();
-    clearPetFlash();
-    petRuntimeState = config(ctx).pets.thinkingState;
+    petController.agentStart(ctx);
     updateFooter(ctx);
   });
 
   pi.on("tool_execution_start", (event, ctx) => {
-    activeToolCallIds.add(event.toolCallId);
-    petRuntimeState = config(ctx).pets.toolState;
+    petController.toolStart(ctx, event.toolCallId);
     updateFooter(ctx);
   });
 
   pi.on("tool_execution_end", (event, ctx) => {
-    activeToolCallIds.delete(event.toolCallId);
-    const cfg = config(ctx);
-    petRuntimeState = activeToolCallIds.size > 0 ? cfg.pets.toolState : cfg.pets.thinkingState;
-    if (event.isError) {
-      playPetFlash(ctx, cfg.pets.failedToolState, cfg);
-      return;
-    }
-    updateFooter(ctx);
+    petController.toolEnd(ctx, event.toolCallId, event.isError);
+    if (!event.isError) updateFooter(ctx);
   });
 
   pi.on("agent_end", (_event, ctx) => {
-    activeToolCallIds.clear();
-    petRuntimeState = "idle";
+    petController.agentEnd();
     updateFooter(ctx);
   });
 
   pi.on("turn_end", (_event, ctx) => {
     refreshFooterTotals(ctx);
     updateFooter(ctx);
-    void refreshUsage(ctx);
+    void usageController.refresh(ctx);
   });
 
   pi.on("session_compact", (_event, ctx) => {
     refreshFooterTotals(ctx);
-    queuePetKittyCleanup();
-    resetPetRenderCache();
+    petController.queueKittyCleanup();
+    petController.resetRenderCache();
     updateFooter(ctx);
   });
 
   pi.on("session_tree", (_event, ctx) => {
     refreshFooterTotals(ctx);
-    queuePetKittyCleanup();
-    resetPetRenderCache();
+    petController.queueKittyCleanup();
+    petController.resetRenderCache();
     updateFooter(ctx);
   });
 
   pi.on("model_select", (event, ctx) => {
     const cfg = config(ctx);
-    const wasActive = active;
-    applyDesiredFastState(ctx, cfg);
-    if (active !== wasActive) {
+    const wasActive = fastController.active;
+    fastController.applyDesiredState(ctx, cfg);
+    if (fastController.active !== wasActive) {
       persist(cfg);
       ctx.ui.notify(
-        active
-          ? stateText(ctx, desiredActive, active, cfg.supportedModels)
-          : `Fast mode inactive for unsupported model ${currentModelKey(ctx)}.`,
-        active ? "info" : "warning",
+        fastController.active
+          ? fastController.stateText(ctx, cfg)
+          : fastController.inactiveForModelMessage(ctx),
+        fastController.active ? "info" : "warning",
       );
     }
     updateFooter(ctx);
-    void refreshUsage(ctx, event.model.id, { force: true });
+    void usageController.refresh(ctx, event.model.id, { force: true });
   });
 
   pi.on("session_shutdown", () => {
-    shuttingDown = true;
-    queuedUsageRefresh = undefined;
-    queuedPetRefresh = undefined;
-    petLoadingKey = undefined;
-    petLoadNotify = false;
-    usageAbortController?.abort();
-    usageAbortController = undefined;
-    if (usageTimer) clearInterval(usageTimer);
-    usageTimer = undefined;
-    activeToolCallIds.clear();
-    uninstallPetResizeGuard();
-    disposePetKittyNow();
-    resetPetRenderCache();
-    clearPetFlash();
-    stopPetIdleEmotes();
-    stopPetAnimation();
-    stopPendingPetRenderRequest();
+    usageController.shutdown();
+    petController.shutdown();
   });
 
   pi.on("before_provider_request", (event, ctx) => {
-    const nextConfig = config(ctx);
-    if (!active || !supportsFast(ctx, nextConfig.supportedModels) || !isRecord(event.payload))
-      return;
-    lastInjectedAt = Date.now();
-    lastInjectedModel = currentModelKey(ctx);
-    lastInjectedTier = SERVICE_TIER;
-    return { ...event.payload, service_tier: SERVICE_TIER };
+    return fastController.injectProviderPayload(event, ctx, config(ctx));
   });
 }
 
