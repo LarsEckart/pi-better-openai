@@ -3,7 +3,37 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { _test } from "../index.ts";
-import { isRecord, readRawConfig, writeConfig } from "../src/config.ts";
+import {
+  applySettingToRawConfig,
+  isRecord,
+  readConfig,
+  readRawConfig,
+  writeConfig,
+} from "../src/config.ts";
+
+function withTempDir<T>(run: (tempDir: string) => T): T {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-better-openai-"));
+  try {
+    return run(tempDir);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+function withHome<T>(home: string, run: () => T): T {
+  const previousHome = process.env.HOME;
+  const previousUserProfile = process.env.USERPROFILE;
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  try {
+    return run();
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = previousUserProfile;
+  }
+}
 
 describe("config helpers", () => {
   test("exposes expected defaults", () => {
@@ -35,8 +65,7 @@ describe("config helpers", () => {
   });
 
   test("preserves unknown config fields while writing updates", () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "pi-better-openai-"));
-    try {
+    withTempDir((tempDir) => {
       const configPath = join(tempDir, "config.json");
       writeConfig(configPath, {
         active: false,
@@ -63,8 +92,129 @@ describe("config helpers", () => {
       expect(resolved.image.defaultSave).toBe("global");
       expect(resolved.image.outputFormat).toBe("webp");
       expect(resolved.image.timeoutMs).toBe(30000);
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+    });
+  });
+
+  test("project config overrides global config while global fills missing nested values", () => {
+    withTempDir((tempDir) => {
+      const cwd = join(tempDir, "project");
+      const home = join(tempDir, "home");
+      withHome(home, () => {
+        const paths = _test.configPaths(cwd, home);
+        writeConfig(paths.global, {
+          usage: { enabled: false, refreshIntervalMs: 20000, showResetTimes: false },
+          footer: { mode: "replace" },
+          image: { defaultSave: "global", outputFormat: "jpeg", timeoutMs: 40000 },
+          pets: {
+            placement: "badge",
+            idleEmotes: false,
+            idleEmoteIntervalMs: 10000,
+            sizeCells: 14,
+          },
+        });
+        writeConfig(paths.project, {
+          usage: { enabled: true },
+          footer: { mode: "status" },
+          image: { outputFormat: "webp" },
+          pets: { sizeCells: 6 },
+        });
+
+        const resolved = _test.resolveConfig(cwd);
+
+        expect(resolved.usage).toMatchObject({
+          enabled: true,
+          refreshIntervalMs: 20000,
+          showResetTimes: false,
+        });
+        expect(resolved.footer.mode).toBe("status");
+        expect(resolved.image).toMatchObject({
+          defaultSave: "global",
+          outputFormat: "webp",
+          timeoutMs: 40000,
+        });
+        expect(resolved.pets).toMatchObject({
+          placement: "badge",
+          idleEmotes: false,
+          idleEmoteIntervalMs: 10000,
+          sizeCells: 6,
+        });
+      });
+    });
+  });
+
+  test("ignores invalid enum values while reading config", () => {
+    withTempDir((tempDir) => {
+      const configPath = join(tempDir, "config.json");
+      writeConfig(configPath, {
+        footer: { mode: "float" },
+        image: { enabled: true, defaultSave: "desktop", outputFormat: "gif" },
+        pets: { enabled: true, placement: "ceiling", state: "sleeping", thinkingState: "ponder" },
+      });
+
+      const parsed = readConfig(configPath);
+
+      expect(parsed?.footer).toBeUndefined();
+      expect(parsed?.image).toEqual({ enabled: true });
+      expect(parsed?.pets).toEqual({ enabled: true });
+    });
+  });
+
+  test("clamps numeric usage, image, and pet settings", () => {
+    withTempDir((tempDir) => {
+      const projectConfigPath = _test.configPaths(tempDir).project;
+      writeConfig(projectConfigPath, {
+        usage: { refreshIntervalMs: 1 },
+        image: { timeoutMs: 1 },
+        pets: { idleEmoteIntervalMs: 1, sizeCells: 99 },
+      });
+
+      const resolved = _test.resolveConfig(tempDir);
+
+      expect(resolved.usage.refreshIntervalMs).toBe(15000);
+      expect(resolved.image.timeoutMs).toBe(30000);
+      expect(resolved.pets.idleEmoteIntervalMs).toBe(5000);
+      expect(resolved.pets.sizeCells).toBe(16);
+    });
+  });
+
+  test("applies settings writes with persisted raw config shapes", () => {
+    const raw = {
+      unknown: "preserved",
+      usage: { unknownUsage: true },
+      pets: { unknownPet: "yes" },
+    };
+
+    expect(
+      applySettingToRawConfig(raw, "fast.enabled", "true", {
+        persistState: true,
+        active: true,
+        desiredActive: true,
+      }),
+    ).toMatchObject({ active: true, desiredActive: true, unknown: "preserved" });
+    expect(
+      applySettingToRawConfig(raw, "fast.enabled", "true", {
+        persistState: false,
+        active: true,
+        desiredActive: true,
+      }),
+    ).not.toHaveProperty("active");
+
+    expect(applySettingToRawConfig(raw, "usage.refreshIntervalMs", "15000").usage).toEqual({
+      unknownUsage: true,
+      refreshIntervalMs: 15000,
+    });
+    expect(applySettingToRawConfig(raw, "footer.mode", "status").footer).toEqual({
+      mode: "status",
+    });
+    expect(
+      applySettingToRawConfig(raw, "pets.slug", "not selected", { petEmptyValue: "not selected" })
+        .pets,
+    ).toEqual({ unknownPet: "yes", slug: "" });
+    expect(applySettingToRawConfig(raw, "pets.sizeCells", "12").pets).toMatchObject({
+      sizeCells: 12,
+    });
+    expect(applySettingToRawConfig(raw, "image.timeoutMs", "45000").image).toEqual({
+      timeoutMs: 45000,
+    });
   });
 });

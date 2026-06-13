@@ -276,6 +276,69 @@ export function readConfig(path: string): ConfigFile | undefined {
   return config;
 }
 
+export type SettingPatchContext = {
+  persistState?: boolean;
+  active?: boolean;
+  desiredActive?: boolean;
+  petEmptyValue?: string;
+};
+
+export function applySettingToRawConfig(
+  current: Record<string, unknown>,
+  id: string,
+  rawValue: string,
+  context: SettingPatchContext = {},
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...current };
+  const bool = rawValue === "true";
+  const num = Number(rawValue);
+  if (id === "fast.enabled") {
+    if (context.persistState) {
+      next.active = context.active ?? bool;
+      next.desiredActive = context.desiredActive ?? bool;
+    }
+  } else if (id === "persistState") next.persistState = bool;
+  else if (id.startsWith("usage.")) {
+    const usage = isRecord(next.usage) ? { ...next.usage } : {};
+    const key = id.slice("usage.".length);
+    usage[key] = key === "refreshIntervalMs" ? num : bool;
+    next.usage = usage;
+  } else if (id === "footer.mode") {
+    const footer = isRecord(next.footer) ? { ...next.footer } : {};
+    footer.mode = rawValue;
+    next.footer = footer;
+  } else if (id.startsWith("pets.")) {
+    const pets = isRecord(next.pets) ? { ...next.pets } : {};
+    const key = id.slice("pets.".length);
+    pets[key] =
+      key === "sizeCells" || key === "idleEmoteIntervalMs"
+        ? num
+        : key === "slug"
+          ? rawValue === (context.petEmptyValue ?? "not selected")
+            ? ""
+            : rawValue
+          : rawValue === "true"
+            ? true
+            : rawValue === "false"
+              ? false
+              : rawValue;
+    next.pets = pets;
+  } else if (id.startsWith("image.")) {
+    const image = isRecord(next.image) ? { ...next.image } : {};
+    const key = id.slice("image.".length);
+    image[key] =
+      key === "timeoutMs"
+        ? num
+        : rawValue === "true"
+          ? true
+          : rawValue === "false"
+            ? false
+            : rawValue;
+    next.image = image;
+  }
+  return next;
+}
+
 export function writeConfig(path: string, config: ConfigFile | Record<string, unknown>): void {
   try {
     mkdirSync(dirname(path), { recursive: true });

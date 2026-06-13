@@ -48,6 +48,7 @@ import {
   readRawConfig,
   resolveConfig,
   writeConfig,
+  applySettingToRawConfig,
 } from "./src/config.ts";
 import {
   AUTH_FILE,
@@ -1498,55 +1499,25 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     const cfg = refresh(ctx);
     const current = readRawConfig(cfg.configPath);
     const bool = rawValue === "true";
-    const num = Number(rawValue);
     if (id === "fast.enabled") {
       desiredActive = bool;
       applyDesiredFastState(ctx, cfg);
-      if (cfg.persistState) {
-        current.active = active;
-        current.desiredActive = desiredActive;
-      }
-    } else if (id === "persistState") current.persistState = bool;
-    else if (id.startsWith("usage.")) {
-      const usage = isRecord(current.usage) ? current.usage : {};
-      const key = id.slice("usage.".length);
-      usage[key] = key === "refreshIntervalMs" ? num : bool;
-      current.usage = usage;
-    } else if (id === "footer.mode") {
-      const footer = isRecord(current.footer) ? current.footer : {};
-      footer.mode = rawValue;
-      current.footer = footer;
-    } else if (id.startsWith("pets.")) {
-      const pets = isRecord(current.pets) ? current.pets : {};
-      const key = id.slice("pets.".length);
-      pets[key] =
-        key === "sizeCells" || key === "idleEmoteIntervalMs"
-          ? num
-          : key === "slug"
-            ? petSlugFromPickerValue(rawValue)
-            : rawValue === "true"
-              ? true
-              : rawValue === "false"
-                ? false
-                : rawValue;
-      current.pets = pets;
-      if (key === "enabled" || key === "sizeCells" || key === "slug") petLoadKey = undefined;
-      if (key === "placement" || key === "sizeCells" || key === "slug") resetPetRenderCache();
-      if (key === "idleEmotes" || key === "idleEmoteIntervalMs") stopPetIdleEmotes();
-    } else if (id.startsWith("image.")) {
-      const image = isRecord(current.image) ? current.image : {};
-      const key = id.slice("image.".length);
-      image[key] =
-        key === "timeoutMs"
-          ? num
-          : rawValue === "true"
-            ? true
-            : rawValue === "false"
-              ? false
-              : rawValue;
-      current.image = image;
     }
-    writeConfig(cfg.configPath, current);
+    const petKey = id.startsWith("pets.") ? id.slice("pets.".length) : undefined;
+    const nextRawConfig = applySettingToRawConfig(current, id, rawValue, {
+      persistState: cfg.persistState,
+      active,
+      desiredActive,
+      petEmptyValue: PET_EMPTY_VALUE,
+    });
+    if (petKey) {
+      if (petKey === "enabled" || petKey === "sizeCells" || petKey === "slug")
+        petLoadKey = undefined;
+      if (petKey === "placement" || petKey === "sizeCells" || petKey === "slug")
+        resetPetRenderCache();
+      if (petKey === "idleEmotes" || petKey === "idleEmoteIntervalMs") stopPetIdleEmotes();
+    }
+    writeConfig(cfg.configPath, nextRawConfig);
     const next = refresh(ctx);
     if (id === "pets.enabled" || id === "pets.sizeCells" || id === "pets.slug")
       void refreshPet(ctx, next);
