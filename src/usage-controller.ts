@@ -13,15 +13,22 @@ import {
 import { currentModelKey } from "./fast-controller.ts";
 
 export function isOpenAISubscriptionModel(ctx: ExtensionContext, cfg: ResolvedConfig): boolean {
-  if (!ctx.model || (ctx.model.provider !== "openai" && ctx.model.provider !== "openai-codex"))
-    return false;
-  return !cfg.usage.showOnlyOnSubscriptionModels || ctx.modelRegistry.isUsingOAuth(ctx.model);
+  const model = ctx.model;
+  if (!model || (model.provider !== "openai" && model.provider !== "openai-codex")) return false;
+  return !cfg.usage.showOnlyOnSubscriptionModels || ctx.modelRegistry.isUsingOAuth(model);
+}
+
+const STALE_EXTENSION_CONTEXT_MESSAGE = "This extension ctx is stale";
+
+function isStaleExtensionContextError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes(STALE_EXTENSION_CONTEXT_MESSAGE);
 }
 
 type UsageRefreshOptions = { notify?: boolean; force?: boolean };
 
 type QueuedUsageRefresh = {
   ctx: ExtensionContext;
+  generation: number;
   modelId?: string;
   notify?: boolean;
   force?: boolean;
@@ -39,6 +46,7 @@ export class UsageController {
   private usageAbortController: AbortController | undefined;
   private sessionAbortSignal: AbortSignal | undefined;
   private sessionAbortHandler: (() => void) | undefined;
+  private sessionGeneration = 0;
 
   constructor(
     private readonly getConfig: (ctx: ExtensionContext) => ResolvedConfig,
@@ -87,34 +95,71 @@ export class UsageController {
     ].join("\n");
   }
 
+  private isGenerationCurrent(generation: number): boolean {
+    return !this.shuttingDown && generation === this.sessionGeneration;
+  }
+
+  private deactivateGeneration(generation: number): void {
+    if (generation !== this.sessionGeneration) return;
+    this.shuttingDown = true;
+    this.sessionGeneration++;
+    this.queuedUsageRefresh = undefined;
+    this.usageAbortController?.abort();
+    this.usageAbortController = undefined;
+    this.stopTimer();
+  }
+
+  private handleStaleContextError(error: unknown, generation: number): boolean {
+    if (!isStaleExtensionContextError(error)) return false;
+    this.deactivateGeneration(generation);
+    return true;
+  }
+
   async refresh(
     ctx: ExtensionContext,
-    modelId = ctx.model?.id,
+    modelId?: string,
     options?: UsageRefreshOptions,
+    generation = this.sessionGeneration,
   ): Promise<void> {
-    if (this.shuttingDown || !ctx.hasUI) return;
+    if (!this.isGenerationCurrent(generation)) return;
+
+    let resolvedModelId = modelId;
+    try {
+      if (!ctx.hasUI) return;
+      resolvedModelId ??= ctx.model?.id;
+    } catch (error) {
+      this.handleStaleContextError(error, generation);
+      return;
+    }
+
     if (this.usageRefreshInFlight) {
+      const queued =
+        this.queuedUsageRefresh?.generation === generation ? this.queuedUsageRefresh : undefined;
       this.queuedUsageRefresh = {
         ctx,
-        modelId,
-        notify: this.queuedUsageRefresh?.notify || options?.notify,
-        force: this.queuedUsageRefresh?.force || options?.force,
+        generation,
+        modelId: resolvedModelId,
+        notify: queued?.notify || options?.notify,
+        force: queued?.force || options?.force,
       };
       return;
     }
+
     this.usageRefreshInFlight = true;
-    const cfg = this.getConfig(ctx);
     try {
+      const cfg = this.getConfig(ctx);
+      if (!this.isGenerationCurrent(generation)) return;
+
       if (!cfg.usage.enabled) {
         this.usageSnapshot = undefined;
         this.usageError = "Usage display is disabled.";
-        if (!this.shuttingDown) this.updateFooter(ctx);
-        if (!this.shuttingDown && options?.notify) ctx.ui.notify(this.formatStatus(ctx), "warning");
+        this.updateFooter(ctx);
+        if (options?.notify) ctx.ui.notify(this.formatStatus(ctx), "warning");
         return;
       }
       if (!isOpenAISubscriptionModel(ctx, cfg)) {
-        if (!this.shuttingDown) this.updateFooter(ctx);
-        if (!this.shuttingDown && options?.notify) ctx.ui.notify(this.formatStatus(ctx), "warning");
+        this.updateFooter(ctx);
+        if (options?.notify) ctx.ui.notify(this.formatStatus(ctx), "warning");
         return;
       }
       const shouldThrottle =
@@ -125,7 +170,7 @@ export class UsageController {
         this.usageSnapshot !== undefined &&
         this.usageError === undefined;
       if (shouldThrottle) {
-        if (!this.shuttingDown) this.updateFooter(ctx);
+        this.updateFooter(ctx);
         return;
       }
       this.usageAbortController = new AbortController();
@@ -134,27 +179,42 @@ export class UsageController {
         ? AbortSignal.any([ctx.signal, timeoutSignal, this.usageAbortController.signal])
         : AbortSignal.any([timeoutSignal, this.usageAbortController.signal]);
       const data = await requestCodexUsage(ctx, signal);
+      if (!this.isGenerationCurrent(generation)) return;
+
       this.usageLastFetchAt = Date.now();
-      this.usageSnapshot = data ? parseUsageSnapshot(data, modelId) : undefined;
+      this.usageSnapshot = data ? parseUsageSnapshot(data, resolvedModelId) : undefined;
       this.usageUpdatedAt = this.usageSnapshot ? Date.now() : undefined;
       this.usageError = data
         ? undefined
         : `Missing openai-codex OAuth credentials in ${AUTH_FILE}.`;
-      if (!this.shuttingDown) this.updateFooter(ctx);
-      if (!this.shuttingDown && options?.notify)
+      this.updateFooter(ctx);
+      if (options?.notify)
         ctx.ui.notify(this.formatStatus(ctx), this.usageSnapshot ? "info" : "warning");
     } catch (error) {
-      if (this.shuttingDown) return;
+      if (this.handleStaleContextError(error, generation) || !this.isGenerationCurrent(generation))
+        return;
       this.usageError = error instanceof Error ? error.message : String(error);
-      this.updateFooter(ctx);
-      if (options?.notify) ctx.ui.notify(this.formatStatus(ctx), "warning");
+      try {
+        this.updateFooter(ctx);
+        if (options?.notify) ctx.ui.notify(this.formatStatus(ctx), "warning");
+      } catch (secondaryError) {
+        if (!this.handleStaleContextError(secondaryError, generation)) {
+          this.usageError =
+            secondaryError instanceof Error ? secondaryError.message : String(secondaryError);
+        }
+      }
     } finally {
       this.usageAbortController = undefined;
       this.usageRefreshInFlight = false;
-      if (!this.shuttingDown && this.queuedUsageRefresh) {
-        const next = this.queuedUsageRefresh;
-        this.queuedUsageRefresh = undefined;
-        void this.refresh(next.ctx, next.modelId, { notify: next.notify, force: next.force });
+      const next = this.queuedUsageRefresh;
+      this.queuedUsageRefresh = undefined;
+      if (next && !this.shuttingDown && next.generation === this.sessionGeneration) {
+        void this.refresh(
+          next.ctx,
+          next.modelId,
+          { notify: next.notify, force: next.force },
+          next.generation,
+        );
       }
     }
   }
@@ -170,33 +230,42 @@ export class UsageController {
   }
 
   start(ctx: ExtensionContext): void {
-    this.shuttingDown = false;
+    this.usageAbortController?.abort();
+    this.queuedUsageRefresh = undefined;
     this.stopTimer();
+    const generation = ++this.sessionGeneration;
+    this.shuttingDown = false;
+
     const cfg = this.getConfig(ctx);
     if (!cfg.usage.enabled) return;
     const sessionSignal = ctx.signal;
-    if (sessionSignal?.aborted) return;
+    if (sessionSignal?.aborted) {
+      this.deactivateGeneration(generation);
+      return;
+    }
     this.sessionAbortSignal = sessionSignal;
     this.sessionAbortHandler = () => {
-      this.stopTimer();
-      this.usageAbortController?.abort();
-      this.usageAbortController = undefined;
-      this.queuedUsageRefresh = undefined;
+      this.deactivateGeneration(generation);
     };
     sessionSignal?.addEventListener("abort", this.sessionAbortHandler, { once: true });
-    void this.refresh(ctx, undefined, { force: true });
+    void this.refresh(ctx, undefined, { force: true }, generation);
     this.usageTimer = setInterval(() => {
+      if (!this.isGenerationCurrent(generation)) return;
       if (sessionSignal?.aborted) {
-        this.stopTimer();
+        this.deactivateGeneration(generation);
         return;
       }
-      void this.refresh(ctx);
+      void this.refresh(ctx, undefined, undefined, generation);
     }, cfg.usage.refreshIntervalMs);
     this.usageTimer.unref?.();
   }
 
   restartAfterSettingsChange(ctx: ExtensionContext, cfg: ResolvedConfig): void {
+    this.usageAbortController?.abort();
+    this.queuedUsageRefresh = undefined;
     this.stopTimer();
+    this.sessionGeneration++;
+    this.shuttingDown = false;
     if (cfg.usage.enabled) this.start(ctx);
     else {
       this.usageSnapshot = undefined;
@@ -206,6 +275,7 @@ export class UsageController {
 
   shutdown(): void {
     this.shuttingDown = true;
+    this.sessionGeneration++;
     this.queuedUsageRefresh = undefined;
     this.usageAbortController?.abort();
     this.usageAbortController = undefined;

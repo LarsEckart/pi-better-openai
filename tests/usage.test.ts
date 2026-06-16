@@ -358,6 +358,32 @@ describe("usage polling lifecycle", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  test("stops interval polling when pi marks the captured ctx stale", async () => {
+    vi.useFakeTimers();
+    const fetchMock = stubUsageFetch(usageJsonResponse);
+    const harness = await createUsageHarness({
+      usageConfig: {
+        enabled: true,
+        refreshIntervalMs: 15000,
+        showOnlyOnSubscriptionModels: true,
+      },
+      isUsingOAuth: true,
+    });
+
+    await emit(harness, "session_start");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    Object.defineProperty(harness.ctx, "model", {
+      get() {
+        throw new Error("This extension ctx is stale after session replacement or reload.");
+      },
+    });
+    fetchMock.mockClear();
+
+    await vi.advanceTimersByTimeAsync(60000);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   test("throttles repeated turn-end refreshes within the configured interval", async () => {
     const fetchMock = stubUsageFetch(usageJsonResponse);
     const harness = await createUsageHarness({
