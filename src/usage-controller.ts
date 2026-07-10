@@ -1,6 +1,6 @@
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ResolvedConfig } from "./config.ts";
-import { maskIdentifier } from "./format.ts";
+import { maskIdentifier, sanitizeDiagnosticError } from "./format.ts";
 import {
   AUTH_FILE,
   type UsageSnapshot,
@@ -9,13 +9,21 @@ import {
   parseUsageSnapshot,
   readCodexAuth,
   requestCodexUsage,
+  usageScopeForModel,
 } from "./usage.ts";
 import { currentModelKey } from "./fast-controller.ts";
 
-export function isOpenAISubscriptionModel(ctx: ExtensionContext, cfg: ResolvedConfig): boolean {
+export function isOpenAISubscriptionModel(
+  ctx: ExtensionContext,
+  cfg: ResolvedConfig,
+  isUsingOAuth?: boolean,
+): boolean {
   const model = ctx.model;
   if (!model || (model.provider !== "openai" && model.provider !== "openai-codex")) return false;
-  return !cfg.usage.showOnlyOnSubscriptionModels || ctx.modelRegistry.isUsingOAuth(model);
+  return (
+    !cfg.usage.showOnlyOnSubscriptionModels ||
+    (isUsingOAuth ?? ctx.modelRegistry.isUsingOAuth(model))
+  );
 }
 
 const STALE_EXTENSION_CONTEXT_MESSAGE = "This extension ctx is stale";
@@ -57,8 +65,16 @@ export class UsageController {
     return this.usageSnapshot;
   }
 
-  statusLine(ctx: ExtensionContext, cfg = this.getConfig(ctx)): string | undefined {
-    return this.usageSnapshot && cfg.usage.enabled && isOpenAISubscriptionModel(ctx, cfg)
+  statusLine(
+    ctx: ExtensionContext,
+    cfg = this.getConfig(ctx),
+    isUsingOAuth?: boolean,
+  ): string | undefined {
+    return this.usageSnapshot &&
+      !this.usageError &&
+      this.usageSnapshot.scope === usageScopeForModel(ctx.model?.id) &&
+      cfg.usage.enabled &&
+      isOpenAISubscriptionModel(ctx, cfg, isUsingOAuth)
       ? formatUsageSnapshot(this.usageSnapshot, cfg.usage)
       : undefined;
   }
@@ -68,8 +84,9 @@ export class UsageController {
     if (!cfg.usage.enabled) return "Usage display is disabled.";
     if (!isOpenAISubscriptionModel(ctx, cfg))
       return "Usage hidden: current model is not an OpenAI subscription model.";
-    if (!this.usageSnapshot)
-      return `Usage unavailable${this.usageError ? `: ${this.usageError}` : "."}`;
+    if (this.usageError) return `Usage unavailable: ${this.usageError}`;
+    if (!this.usageSnapshot || this.usageSnapshot.scope !== usageScopeForModel(ctx.model?.id))
+      return "Usage unavailable.";
     const stale =
       this.usageUpdatedAt && Date.now() - this.usageUpdatedAt > cfg.usage.refreshIntervalMs * 2
         ? ` | stale ${formatResetCountdown((Date.now() - this.usageUpdatedAt) / 1000)}`
@@ -166,13 +183,9 @@ export class UsageController {
         !options?.force &&
         !options?.notify &&
         this.usageLastFetchAt !== undefined &&
-        Date.now() - this.usageLastFetchAt < cfg.usage.refreshIntervalMs &&
-        this.usageSnapshot !== undefined &&
-        this.usageError === undefined;
-      if (shouldThrottle) {
-        this.updateFooter(ctx);
-        return;
-      }
+        Date.now() - this.usageLastFetchAt < cfg.usage.refreshIntervalMs;
+      if (shouldThrottle) return;
+      this.usageLastFetchAt = Date.now();
       this.usageAbortController = new AbortController();
       const timeoutSignal = AbortSignal.timeout(10_000);
       const signal = ctx.signal
@@ -181,7 +194,6 @@ export class UsageController {
       const data = await requestCodexUsage(ctx, signal);
       if (!this.isGenerationCurrent(generation)) return;
 
-      this.usageLastFetchAt = Date.now();
       this.usageSnapshot = data ? parseUsageSnapshot(data, resolvedModelId) : undefined;
       this.usageUpdatedAt = this.usageSnapshot ? Date.now() : undefined;
       this.usageError = data
@@ -193,14 +205,17 @@ export class UsageController {
     } catch (error) {
       if (this.handleStaleContextError(error, generation) || !this.isGenerationCurrent(generation))
         return;
-      this.usageError = error instanceof Error ? error.message : String(error);
+      this.usageError = sanitizeDiagnosticError(
+        error instanceof Error ? error.message : String(error),
+      );
       try {
         this.updateFooter(ctx);
         if (options?.notify) ctx.ui.notify(this.formatStatus(ctx), "warning");
       } catch (secondaryError) {
         if (!this.handleStaleContextError(secondaryError, generation)) {
-          this.usageError =
-            secondaryError instanceof Error ? secondaryError.message : String(secondaryError);
+          this.usageError = sanitizeDiagnosticError(
+            secondaryError instanceof Error ? secondaryError.message : String(secondaryError),
+          );
         }
       }
     } finally {

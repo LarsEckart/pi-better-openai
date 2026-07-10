@@ -1,10 +1,9 @@
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { piAgentDir } from "./paths.ts";
 
-const AGENT_DIR = process.env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), ".pi", "agent");
-export const AUTH_FILE = join(AGENT_DIR, "auth.json");
+export const AUTH_FILE = join(piAgentDir(), "auth.json");
 
 export type CodexCredentials = {
   accessToken: string;
@@ -14,6 +13,30 @@ export type CodexCredentials = {
 export type CodexCredentialsWithSource = CodexCredentials & {
   source: "modelRegistry" | "authFile";
 };
+
+function waitForSignal<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return operation;
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("Operation was aborted."));
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(signal.reason ?? new Error("Operation was aborted."));
+    };
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    signal.addEventListener("abort", onAbort, { once: true });
+    void operation.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error: unknown) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
 
 function decodeBase64Url(value: string): string {
   const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
@@ -79,11 +102,13 @@ export function readCodexAuth(): CodexCredentials | undefined {
           access?: string | null;
           accountId?: string | null;
           account_id?: string | null;
+          expires?: number | null;
         }
       | undefined
     >;
     const entry = auth["openai-codex"];
     if (entry?.type !== "oauth") return undefined;
+    if (typeof entry.expires === "number" && Date.now() >= entry.expires) return undefined;
     const accessToken = entry.access?.trim();
     const accountId = (entry.accountId ?? entry.account_id)?.trim();
     return accessToken && accountId ? { accessToken, accountId } : undefined;
@@ -94,10 +119,16 @@ export function readCodexAuth(): CodexCredentials | undefined {
 
 export async function getCodexCredentials(
   ctx?: Pick<ExtensionContext, "modelRegistry">,
+  signal?: AbortSignal,
 ): Promise<CodexCredentialsWithSource | undefined> {
-  const registryToken = await ctx?.modelRegistry
-    ?.getApiKeyForProvider("openai-codex")
-    .catch(() => undefined);
+  if (signal?.aborted) throw signal.reason ?? new Error("Operation was aborted.");
+  const registryRequest = ctx?.modelRegistry?.getApiKeyForProvider("openai-codex");
+  const registryToken = registryRequest
+    ? await waitForSignal(
+        registryRequest.catch(() => undefined),
+        signal,
+      )
+    : undefined;
   const registryCredentials = parseCodexRegistryCredentials(registryToken);
   if (registryCredentials) return { ...registryCredentials, source: "modelRegistry" };
   const auth = readCodexAuth();

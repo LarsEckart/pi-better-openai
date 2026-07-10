@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { _test } from "../index.ts";
 import { maskIdentifier, sanitizeDiagnosticError } from "../src/format.ts";
@@ -24,7 +24,7 @@ function createTempDir(prefix: string): string {
   return dir;
 }
 
-function writeCodexAuth(agentDir: string): void {
+function writeCodexAuth(agentDir: string, expires?: number): void {
   mkdirSync(agentDir, { recursive: true });
   writeFileSync(
     join(agentDir, "auth.json"),
@@ -34,6 +34,7 @@ function writeCodexAuth(agentDir: string): void {
           type: "oauth",
           access: "usage-access",
           accountId: "acct_usage",
+          ...(expires === undefined ? {} : { expires }),
         },
       },
       null,
@@ -215,6 +216,76 @@ describe("usage helpers", () => {
       /^Usage: 5h: 99% \| 7d: 51%$/,
     );
   });
+
+  test("decrements reset countdowns without moving the reset clock", () => {
+    const capturedAt = new Date("2026-07-09T12:00:00Z").getTime();
+    const usage = _test.parseUsageSnapshot(
+      {
+        rate_limit: {
+          primary_window: { used_percent: 10, reset_after_seconds: 3600 },
+        },
+      },
+      "gpt-5.5",
+      capturedAt,
+    );
+
+    const initial = _test.formatUsageSnapshot(usage, { showResetTimes: true }, capturedAt);
+    const later = _test.formatUsageSnapshot(
+      usage,
+      { showResetTimes: true },
+      capturedAt + 30 * 60_000,
+    );
+    const expired = _test.formatUsageSnapshot(
+      usage,
+      { showResetTimes: true },
+      capturedAt + 90 * 60_000,
+    );
+
+    expect(initial).toContain("5h ↺ 1h0m");
+    expect(later).toContain("5h ↺ 30m");
+    expect(initial.split(" - ")[1]).toBe(later.split(" - ")[1]);
+    expect(expired).toContain("5h ↺ 0s");
+    expect(initial.split(" - ")[1]).toBe(expired.split(" - ")[1]);
+  });
+
+  test("refreshes cached reset-clock formatters when the time zone changes", () => {
+    const previousTimeZone = process.env.TZ;
+    const capturedAt = new Date("2026-01-15T12:00:00Z").getTime();
+    const usage = _test.parseUsageSnapshot(
+      {
+        rate_limit: {
+          primary_window: { used_percent: 10, reset_after_seconds: 3600 },
+        },
+      },
+      "gpt-5.5",
+      capturedAt,
+    );
+
+    try {
+      process.env.TZ = "UTC";
+      const utc = _test.formatUsageSnapshot(usage, { showResetTimes: true }, capturedAt);
+      process.env.TZ = "America/Los_Angeles";
+      const losAngeles = _test.formatUsageSnapshot(usage, { showResetTimes: true }, capturedAt);
+      const expectedLosAngelesTime = new Date(capturedAt + 3600_000).toLocaleTimeString(undefined, {
+        hour: "numeric",
+        minute: "2-digit",
+      });
+
+      expect(losAngeles).toContain(expectedLosAngelesTime);
+      expect(losAngeles).not.toBe(utc);
+    } finally {
+      if (previousTimeZone === undefined) delete process.env.TZ;
+      else process.env.TZ = previousTimeZone;
+    }
+  });
+
+  test("falls back to the base rate limit when Spark-specific usage is absent", () => {
+    const usage = _test.parseUsageSnapshot(usageResponseBody(), "gpt-5.3-codex-spark");
+
+    expect(usage.scope).toBe("spark");
+    expect(usage.fiveHourLeftPercent).toBe(90);
+    expect(usage.sevenDayLeftPercent).toBe(80);
+  });
 });
 
 describe("requestCodexUsage", () => {
@@ -268,6 +339,49 @@ describe("requestCodexUsage", () => {
 
     await expect(usage.requestCodexUsage()).resolves.toBeUndefined();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("does not reuse a known-expired auth-file token after registry refresh fails", async () => {
+    const agentDir = createTempDir("pi-better-openai-usage-agent-");
+    writeCodexAuth(agentDir, Date.now() - 1);
+    const fetchMock = stubUsageFetch(usageJsonResponse());
+    const usage = await importUsageWithAgentDir(agentDir);
+    const ctx = {
+      modelRegistry: { getApiKeyForProvider: vi.fn(() => Promise.resolve(undefined)) },
+    } as unknown as ExtensionContext;
+
+    await expect(usage.requestCodexUsage(ctx)).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("allows an abort signal to release a hung registry credential lookup", async () => {
+    const agentDir = createTempDir("pi-better-openai-usage-agent-");
+    const usage = await importUsageWithAgentDir(agentDir);
+    const controller = new AbortController();
+    const ctx = {
+      modelRegistry: {
+        getApiKeyForProvider: vi.fn(() => new Promise<string | undefined>(() => undefined)),
+      },
+    } as unknown as ExtensionContext;
+
+    const request = usage.requestCodexUsage(ctx, controller.signal);
+    controller.abort(new Error("credential lookup aborted"));
+
+    await expect(request).rejects.toThrow("credential lookup aborted");
+  });
+
+  test("does not start a credential lookup for an already-aborted request", async () => {
+    const agentDir = createTempDir("pi-better-openai-usage-agent-");
+    const usage = await importUsageWithAgentDir(agentDir);
+    const controller = new AbortController();
+    controller.abort(new Error("already aborted"));
+    const getApiKeyForProvider = vi.fn(() => Promise.resolve(undefined));
+    const ctx = { modelRegistry: { getApiKeyForProvider } } as unknown as ExtensionContext;
+
+    await expect(usage.requestCodexUsage(ctx, controller.signal)).rejects.toThrow(
+      "already aborted",
+    );
+    expect(getApiKeyForProvider).not.toHaveBeenCalled();
   });
 });
 
@@ -441,6 +555,10 @@ describe("usage polling lifecycle", () => {
 
     await emit(harness, "session_start");
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await emit(harness, "turn_end");
+    await emit(harness, "turn_end");
+    await settleAsyncWork();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     await harness.commands.get("openai-usage")?.handler("", harness.ctx);
     await emit(harness, "session_shutdown");
 
@@ -449,5 +567,37 @@ describe("usage polling lifecycle", () => {
       expect.stringContaining("Codex usage request failed (500)"),
       "warning",
     );
+  });
+
+  test("hides a successful snapshot and reports a later refresh failure", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(usageJsonResponse())
+      .mockResolvedValueOnce(new Response("nope", { status: 500 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const harness = await createUsageHarness({
+      usageConfig: {
+        enabled: true,
+        refreshIntervalMs: 60000,
+        showOnlyOnSubscriptionModels: true,
+        showResetTimes: false,
+      },
+      isUsingOAuth: true,
+    });
+
+    await emit(harness, "session_start");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await harness.commands.get("openai-usage")?.handler("", harness.ctx);
+    await emit(harness, "session_shutdown");
+
+    expect(harness.ctx.ui.notify).toHaveBeenLastCalledWith(
+      expect.stringContaining("Codex usage request failed (500)"),
+      "warning",
+    );
+    expect(harness.ctx.ui.notify).not.toHaveBeenLastCalledWith(
+      expect.stringContaining("5h: 90%"),
+      expect.anything(),
+    );
+    expect(harness.ctx.ui.setStatus).toHaveBeenLastCalledWith(expect.any(String), undefined);
   });
 });

@@ -26,3 +26,6 @@ jobs:
 
       - name: Run check
         run: npm run check
+
+      - name: Run high-severity audit
+        run: npm audit --audit-level=high

@@ -3,7 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { resetCapabilitiesCache, setCapabilities, visibleWidth } from "@mariozechner/pi-tui";
+import { resetCapabilitiesCache, setCapabilities, visibleWidth } from "@earendil-works/pi-tui";
 import sharp from "sharp";
 import { _test } from "../index.ts";
 import {
@@ -169,6 +169,17 @@ describe("Codex pets helpers", () => {
 
     expect(_test.petsTest.findCodexPet(pets, "!!!")).toBeUndefined();
     expect(_test.petsTest.findReadyCodexPet(pets, "!!!")).toBeUndefined();
+  });
+
+  test("looks up Unicode pet names and prioritizes exact slugs over aliases", () => {
+    const unicodePet = petPackage("猫", "猫");
+    expect(_test.petsTest.findReadyCodexPet([unicodePet], "猫")).toBe(unicodePet);
+    expect(_test.petsTest.petLookupKey("E\u0301lan 猫")).toBe("élan猫");
+
+    const alias = petPackage("foobar", "Alias");
+    const exact = petPackage("foo-bar", "Exact");
+    expect(_test.petsTest.findReadyCodexPet([alias, exact], "foo-bar")).toBe(exact);
+    expect(_test.petsTest.findReadyCodexPet([exact, alias], "foo bar")).toBeUndefined();
   });
 
   test("returns empty lists and actionable setup text when no pets exist", async () => {
@@ -454,6 +465,35 @@ describe("Codex pets helpers", () => {
       expect(nextAnimationFrameDelayMs(loaded?.states.idle ?? [], 0)).toBe(280);
       expect(nextAnimationFrameDelayMs(loaded?.states.idle ?? [], 279)).toBe(1);
       expect(nextAnimationFrameDelayMs(loaded?.states.idle ?? [], 280)).toBe(110);
+    });
+  });
+
+  test("precomputes Kitty uploads for loaded pet frames", async () => {
+    setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+    await withTempDir("pi-better-openai-pet-kitty-load-", async (tempDir) => {
+      const petDir = join(tempDir, "pets", "precomputed");
+      mkdirSync(petDir, { recursive: true });
+      writeFileSync(join(petDir, "pet.json"), JSON.stringify({ name: "Precomputed" }));
+      await writeValidSpritesheet(join(petDir, "spritesheet.webp"));
+
+      const loaded = await loadCodexPet("precomputed", tempDir, { sizeCells: 1 });
+      const firstFrame = loaded?.states.idle[0];
+      expect(firstFrame?.rawRgbaData).toBeUndefined();
+      expect(firstFrame?.kittyUpload).toContain("a=t");
+
+      const rendered = renderCodexPetFrame(
+        loaded!,
+        "idle",
+        8,
+        { fg: (_color, value) => value },
+        {
+          sizeCells: 1,
+          imageId: 9,
+          now: 0,
+          kittyManager: new CodexPetKittyManager(9),
+        },
+      ).join("");
+      expect(rendered).toContain(firstFrame!.kittyUpload!);
     });
   });
 

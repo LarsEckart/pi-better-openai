@@ -1,15 +1,23 @@
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import betterOpenAI, { _test } from "../index.ts";
 
 type EventHandler = (event: unknown, ctx: ExtensionContext) => void | Promise<void>;
+type CommandHandler = (args: string, ctx: ExtensionContext) => void | Promise<void>;
 
 type Harness = {
   ctx: ExtensionContext;
   handlers: Map<string, EventHandler[]>;
+  commands: Map<string, CommandHandler>;
+  custom: ReturnType<typeof vi.fn>;
+  notify: ReturnType<typeof vi.fn>;
+  getEntries: ReturnType<typeof vi.fn>;
+  getLeafId: ReturnType<typeof vi.fn>;
+  getContextUsage: ReturnType<typeof vi.fn>;
+  getSessionName: ReturnType<typeof vi.fn>;
   setFooter: ReturnType<typeof vi.fn>;
   setStatus: ReturnType<typeof vi.fn>;
 };
@@ -47,6 +55,13 @@ function writeProjectConfig(cwd: string, footerMode: "replace" | "status" | "off
 
 function createHarness(cwd: string): Harness {
   const handlers = new Map<string, EventHandler[]>();
+  const commands = new Map<string, CommandHandler>();
+  const custom = vi.fn();
+  const notify = vi.fn();
+  const getEntries = vi.fn(() => []);
+  const getLeafId = vi.fn(() => "leaf-1");
+  const getContextUsage = vi.fn(() => ({ contextWindow: 100_000, percent: 12.5 }));
+  const getSessionName = vi.fn(() => undefined);
   const setFooter = vi.fn();
   const setStatus = vi.fn();
 
@@ -57,7 +72,9 @@ function createHarness(cwd: string): Harness {
       handlers.set(event, currentHandlers);
     },
     registerFlag: vi.fn(),
-    registerCommand: vi.fn(),
+    registerCommand(name: string, command: { handler: CommandHandler }) {
+      commands.set(name, command.handler);
+    },
     registerTool: vi.fn(),
     registerMessageRenderer: vi.fn(),
     sendMessage: vi.fn(),
@@ -67,28 +84,43 @@ function createHarness(cwd: string): Harness {
 
   const ctx = {
     cwd,
-    hasUI: false,
+    mode: "tui",
+    hasUI: true,
     signal: undefined,
     model: undefined,
     ui: {
-      notify: vi.fn(),
+      custom,
+      notify,
       setFooter,
       setStatus,
     },
     sessionManager: {
-      getEntries: vi.fn(() => []),
+      getEntries,
+      getLeafId,
       getCwd: vi.fn(() => cwd),
-      getSessionName: vi.fn(() => undefined),
+      getSessionName,
     },
     modelRegistry: {
       isUsingOAuth: vi.fn(() => false),
     },
-    getContextUsage: vi.fn(() => ({ contextWindow: 0, percent: 0 })),
+    getContextUsage,
   } as unknown as ExtensionContext;
 
   betterOpenAI(pi);
 
-  return { ctx, handlers, setFooter, setStatus };
+  return {
+    ctx,
+    handlers,
+    commands,
+    custom,
+    notify,
+    getEntries,
+    getLeafId,
+    getContextUsage,
+    getSessionName,
+    setFooter,
+    setStatus,
+  };
 }
 
 async function emit(harness: Harness, event: string, payload: unknown = {}) {
@@ -117,6 +149,19 @@ describe("footer path formatting", () => {
   });
 });
 
+describe("diagnostic text panel", () => {
+  test("closes only for explicit close keys, not arrow escape sequences", () => {
+    const done = vi.fn();
+    const panel = _test.textPanel("Diagnostics", ["line"], done);
+
+    panel.handleInput("\x1b[A");
+    expect(done).not.toHaveBeenCalled();
+
+    panel.handleInput("\x1b");
+    expect(done).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("footer pet layout", () => {
   test("keeps terminal-image pets on the left for inline-left placement", () => {
     const imageLine = "\x1b[1A\x1b_Ga=p,i=1\x1b\\\x1b[1B";
@@ -138,6 +183,91 @@ describe("footer pet layout", () => {
 });
 
 describe("footer mode ownership", () => {
+  test("reuses context usage between renders and invalidates it on message changes", async () => {
+    const cwd = createTempProject();
+    writeProjectConfig(cwd, "replace");
+    const harness = createHarness(cwd);
+
+    await emit(harness, "session_start");
+    const footerFactory = harness.setFooter.mock.calls[0]?.[0];
+    const footer = footerFactory(
+      { requestRender: vi.fn() },
+      { fg: (_color: string, value: string) => value },
+      {},
+    );
+
+    footer.render(100);
+    footer.render(100);
+    expect(harness.getContextUsage).toHaveBeenCalledTimes(1);
+    expect(harness.getSessionName).toHaveBeenCalledTimes(1);
+
+    await emit(harness, "message_update");
+    footer.render(100);
+    expect(harness.getContextUsage).toHaveBeenCalledTimes(2);
+
+    harness.getLeafId.mockReturnValue("leaf-2");
+    footer.render(100);
+    expect(harness.getContextUsage).toHaveBeenCalledTimes(3);
+    expect(harness.getSessionName).toHaveBeenCalledTimes(2);
+    footer.dispose();
+  });
+
+  test("adds completed-turn usage without rescanning the full session", async () => {
+    const cwd = createTempProject();
+    writeProjectConfig(cwd, "replace");
+    const harness = createHarness(cwd);
+
+    await emit(harness, "session_start");
+    await emit(harness, "turn_end", {
+      message: {
+        role: "assistant",
+        usage: {
+          input: 1_200,
+          output: 300,
+          cacheRead: 400,
+          cacheWrite: 50,
+          cost: { total: 0.25 },
+        },
+      },
+      toolResults: [],
+    });
+
+    expect(harness.getEntries).toHaveBeenCalledTimes(1);
+    const footerFactory = harness.setFooter.mock.calls[0]?.[0];
+    const footer = footerFactory(
+      { requestRender: vi.fn() },
+      { fg: (_color: string, value: string) => value },
+      {},
+    );
+    expect(footer.render(100).join("\n")).toContain("↑1.2k ↓300 R400 W50 $0.250");
+    footer.dispose();
+  });
+
+  test("does not install terminal-only UI in RPC mode", async () => {
+    const cwd = createTempProject();
+    writeProjectConfig(cwd, "replace");
+    const harness = createHarness(cwd);
+    Object.assign(harness.ctx, { mode: "rpc", hasUI: true });
+
+    await emit(harness, "session_start");
+
+    expect(harness.setFooter).not.toHaveBeenCalled();
+  });
+
+  test("does not open the custom settings component in RPC mode", async () => {
+    const cwd = createTempProject();
+    const harness = createHarness(cwd);
+    Object.assign(harness.ctx, { mode: "rpc", hasUI: true });
+
+    await harness.commands.get("openai-settings")?.("", harness.ctx);
+
+    expect(harness.custom).not.toHaveBeenCalled();
+    expect(harness.notify).toHaveBeenCalledWith(
+      "Better OpenAI settings require interactive TUI mode.",
+      "warning",
+    );
+  });
+
   test("off mode leaves existing footer customizations untouched on session start", async () => {
     const cwd = createTempProject();
     writeProjectConfig(cwd, "off");

@@ -9,9 +9,9 @@ import {
 } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, relative } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import sharp from "sharp";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { _test } from "../index.ts";
 import { registerOpenAIImage } from "../src/image.ts";
 import { makeResolvedConfig } from "./helpers.ts";
@@ -51,6 +51,7 @@ type ImageHarness = {
 };
 
 const tempDirs: string[] = [];
+const originalImageSaveDir = process.env.PI_IMAGE_SAVE_DIR;
 
 function createTempProject() {
   const cwd = mkdtempSync(join(tmpdir(), "pi-better-openai-image-"));
@@ -58,13 +59,15 @@ function createTempProject() {
   return cwd;
 }
 
-function sseResponse(events: unknown[]): Response {
+function sseResponse(events: unknown[], lineEnding = "\n"): Response {
   const encoder = new TextEncoder();
   return new Response(
     new ReadableStream({
       start(controller) {
         for (const event of events) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(event)}${lineEnding}${lineEnding}`),
+          );
         }
         controller.close();
       },
@@ -91,6 +94,20 @@ async function writeTinyPng(path: string): Promise<void> {
   })
     .png()
     .toFile(path);
+}
+
+async function writeTinyJpeg(path: string): Promise<void> {
+  const data = await sharp({
+    create: {
+      width: 1,
+      height: 1,
+      channels: 3,
+      background: { r: 0, g: 0, b: 0 },
+    },
+  })
+    .jpeg()
+    .toBuffer();
+  writeFileSync(path, data);
 }
 
 function createImageHarness(
@@ -159,9 +176,15 @@ async function rejectedError(promise: Promise<unknown>): Promise<Error> {
   throw new Error("Expected promise to reject.");
 }
 
+beforeEach(() => {
+  delete process.env.PI_IMAGE_SAVE_DIR;
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.clearAllMocks();
+  if (originalImageSaveDir === undefined) delete process.env.PI_IMAGE_SAVE_DIR;
+  else process.env.PI_IMAGE_SAVE_DIR = originalImageSaveDir;
   for (const tempDir of tempDirs.splice(0)) {
     rmSync(tempDir, { recursive: true, force: true });
   }
@@ -179,12 +202,7 @@ describe("image helpers", () => {
     );
   });
 
-  test("extracts prompts and data URLs", () => {
-    expect(
-      _test.imageTest.latestUserPromptFromEntries([
-        { type: "message", message: { role: "user", content: "draw a dog" } },
-      ]),
-    ).toBe("draw a dog");
+  test("extracts data URLs", () => {
     expect(_test.imageTest.dataUrlParts("data:image/png;base64,Zm9v", "image/png")).toEqual({
       data: "Zm9v",
       mimeType: "image/png",
@@ -270,6 +288,17 @@ describe("openai_image tool execution", () => {
     expect(result.details).toMatchObject({ id: "ig_final", data: "ZmluYWw=" });
   });
 
+  test("parses CRLF-delimited SSE events", async () => {
+    stubFetch(sseResponse([finalImageEvent("ig_crlf", "Y3JsZg==")], "\r\n"));
+    const harness = createImageHarness({
+      registryCredentials: JSON.stringify({ access: "test-access", accountId: "acct_test" }),
+    });
+
+    const result = await executeImageTool(harness, { prompt: "draw", save: "none" });
+
+    expect(result.details).toMatchObject({ id: "ig_crlf", data: "Y3JsZg==" });
+  });
+
   test("rejects streams that end without a completed image_generation_call", async () => {
     stubFetch(sseResponse([{ partial_image_b64: "cGFydGlhbA==" }]));
     const harness = createImageHarness({
@@ -322,6 +351,79 @@ describe("openai_image tool execution", () => {
     expect(files[0]).toMatch(/^openai-image-.*-ig_saved\.png$/);
     expect(readFileSync(join(outputDir, files[0]!)).toString("base64")).toBe("Zm9v");
     expect(result.details).toMatchObject({ savedPath: join(outputDir, files[0]!) });
+  });
+
+  test("uses detected image content type instead of a misleading file extension", async () => {
+    const cwd = createTempProject();
+    const renamedJpeg = join(cwd, "actually-jpeg.png");
+    await writeTinyJpeg(renamedJpeg);
+    const fetchMock = stubFetch(sseResponse([finalImageEvent()]));
+    const harness = createImageHarness({
+      cwd,
+      registryCredentials: JSON.stringify({ access: "test-access", accountId: "acct_test" }),
+    });
+
+    await executeImageTool(harness, {
+      prompt: "edit it",
+      images: ["actually-jpeg.png"],
+      save: "none",
+    });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(String(init.body)).toContain("data:image/jpeg;base64,");
+  });
+
+  test("honors an explicitly refined tool prompt instead of replacing it from history", async () => {
+    const fetchMock = stubFetch(sseResponse([finalImageEvent()]));
+    const harness = createImageHarness({
+      registryCredentials: JSON.stringify({ access: "test-access", accountId: "acct_test" }),
+    });
+    harness.ctx.sessionManager.getEntries = vi.fn(() => [
+      { type: "message", message: { role: "user", content: "raw user wording" } },
+    ]) as unknown as ExtensionContext["sessionManager"]["getEntries"];
+
+    await executeImageTool(harness, { prompt: "explicitly refined prompt", save: "none" });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body)) as { input: Array<{ content: unknown[] }> };
+    expect(body.input[0]?.content).toContainEqual({
+      type: "input_text",
+      text: "explicitly refined prompt",
+    });
+  });
+
+  test("resolves relative custom save directories from the project", async () => {
+    const cwd = createTempProject();
+    stubFetch(sseResponse([finalImageEvent("ig_custom", "Zm9v")]));
+    const harness = createImageHarness({
+      cwd,
+      registryCredentials: JSON.stringify({ access: "test-access", accountId: "acct_test" }),
+    });
+
+    const result = await executeImageTool(harness, {
+      prompt: "draw",
+      save: "custom",
+      saveDir: "artifacts",
+    });
+
+    expect(result.details).toMatchObject({
+      savedPath: expect.stringMatching(
+        new RegExp(`^${join(cwd, "artifacts").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
+      ),
+    });
+    expect(readdirSync(join(cwd, "artifacts"))).toHaveLength(1);
+  });
+
+  test("rejects a missing custom save directory before requesting an image", async () => {
+    const fetchMock = stubFetch(sseResponse([finalImageEvent()]));
+    const harness = createImageHarness({
+      registryCredentials: JSON.stringify({ access: "test-access", accountId: "acct_test" }),
+    });
+
+    await expect(executeImageTool(harness, { prompt: "draw", save: "custom" })).rejects.toThrow(
+      "save=custom requires saveDir or PI_IMAGE_SAVE_DIR",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   test("rejects image paths outside the workspace before upload", async () => {
@@ -388,6 +490,25 @@ describe("openai_image tool execution", () => {
     await expect(
       executeImageTool(harness, { prompt: "draw", images: ["large.png"] }),
     ).rejects.toThrow("Image input is too large");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("caps distinct reference images before building an unbounded request", async () => {
+    const cwd = createTempProject();
+    const imageNames = Array.from(
+      { length: _test.imageTest.MAX_IMAGE_INPUTS + 1 },
+      (_, index) => `input-${index}.png`,
+    );
+    await Promise.all(imageNames.map((name) => writeTinyPng(join(cwd, name))));
+    const fetchMock = stubFetch(sseResponse([finalImageEvent()]));
+    const harness = createImageHarness({
+      cwd,
+      registryCredentials: JSON.stringify({ access: "test-access", accountId: "acct_test" }),
+    });
+
+    await expect(
+      executeImageTool(harness, { prompt: "collage", images: imageNames, save: "none" }),
+    ).rejects.toThrow(`Too many image inputs (max ${_test.imageTest.MAX_IMAGE_INPUTS})`);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

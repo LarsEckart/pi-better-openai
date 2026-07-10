@@ -9,10 +9,16 @@ import {
   getSettingsListTheme,
   type ExtensionAPI,
   type ExtensionContext,
-} from "@mariozechner/pi-coding-agent";
-import { Container, Key, matchesKey, SettingsList } from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-coding-agent";
+import { Container, Key, matchesKey, SettingsList } from "@earendil-works/pi-tui";
 import { CONFIG_BASENAME, STATUS_KEY } from "./src/identity.ts";
-import { formatTokens, sanitizeStatusText, truncateToWidth, visibleWidth } from "./src/format.ts";
+import {
+  formatTokens,
+  redactDiagnosticValue,
+  sanitizeStatusText,
+  truncateToWidth,
+  visibleWidth,
+} from "./src/format.ts";
 import {
   DEFAULT_CONFIG,
   DEFAULT_IMAGE_CONFIG,
@@ -49,6 +55,7 @@ import {
   type CodexPetPackage,
   codexHome,
   describeCodexPetSelectionIssue,
+  findCodexPet,
   findReadyCodexPet,
   formatNoReadyCodexPetsMessage,
   listCodexPets,
@@ -91,6 +98,10 @@ function isInlinePetPlacement(placement: PetPlacement): boolean {
   return placement === "inline-left" || placement === "inline-right" || placement === "badge";
 }
 
+function hasTerminalUI(ctx: ExtensionContext): boolean {
+  return ctx.mode === "tui" || (ctx.mode === undefined && ctx.hasUI);
+}
+
 function petSizeCellsForPlacement(placement: PetPlacement, sizeCells: number): number {
   return placement === "badge" ? Math.min(6, sizeCells) : sizeCells;
 }
@@ -108,19 +119,10 @@ function petSlugFromPickerValue(value: string): string {
   return value === PET_EMPTY_VALUE ? "" : value;
 }
 
-function petPickerLookupKey(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
-
 function findPickerPet(value: string, pets: CodexPetPackage[]): CodexPetPackage | undefined {
-  const requested = petPickerLookupKey(value.trim());
-  if (!requested) return undefined;
-  return pets.find(
-    (pet) =>
-      pet.hasSpritesheet &&
-      (petPickerLookupKey(pet.slug) === requested ||
-        petPickerLookupKey(pet.name) === requested ||
-        (pet.id !== undefined && petPickerLookupKey(pet.id) === requested)),
+  return findCodexPet(
+    pets.filter((pet) => pet.hasSpritesheet),
+    value,
   );
 }
 
@@ -245,12 +247,32 @@ function combineInlinePetFooter(
   return lines;
 }
 
+function textPanel(title: string, lines: string[], done: () => void) {
+  return {
+    render(width: number) {
+      const clipped = lines.map((line) => truncateToWidth(line, width, "..."));
+      return [title, "", ...clipped, "", "Esc/q to go back"];
+    },
+    invalidate() {},
+    handleInput(data: string) {
+      if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c")) || data === "q") done();
+    },
+  };
+}
+
 export default function betterOpenAI(pi: ExtensionAPI): void {
   const fastController = new FastController(SERVICE_TIER);
   let cachedConfig: ResolvedConfig | undefined;
   let footerTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
   let footerInstalled = false;
   let statusInstalled = false;
+  let contextUsageCached = false;
+  let cachedContextUsage: ReturnType<ExtensionContext["getContextUsage"]>;
+  let cachedContextLeafId: string | null | undefined;
+  let cachedContextModel: ExtensionContext["model"];
+  let sessionNameCached = false;
+  let cachedSessionNameLeafId: string | null | undefined;
+  let cachedSessionName: string | undefined;
   const usageController = new UsageController(config, updateFooter);
   const petController = new PetFooterController(config, updateFooter, () => footerInstalled);
 
@@ -310,6 +332,41 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     }
   }
 
+  function invalidateContextUsage(): void {
+    contextUsageCached = false;
+    cachedContextUsage = undefined;
+    cachedContextLeafId = undefined;
+    cachedContextModel = undefined;
+  }
+
+  function contextUsage(ctx: ExtensionContext): ReturnType<ExtensionContext["getContextUsage"]> {
+    const leafId = ctx.sessionManager.getLeafId();
+    const model = ctx.model;
+    if (!contextUsageCached || leafId !== cachedContextLeafId || model !== cachedContextModel) {
+      cachedContextUsage = ctx.getContextUsage();
+      contextUsageCached = true;
+      cachedContextLeafId = leafId;
+      cachedContextModel = model;
+    }
+    return cachedContextUsage;
+  }
+
+  function sessionName(ctx: ExtensionContext): string | undefined {
+    const leafId = ctx.sessionManager.getLeafId();
+    if (!sessionNameCached || leafId !== cachedSessionNameLeafId) {
+      cachedSessionName = ctx.sessionManager.getSessionName();
+      cachedSessionNameLeafId = leafId;
+      sessionNameCached = true;
+    }
+    return cachedSessionName;
+  }
+
+  function invalidateSessionName(): void {
+    sessionNameCached = false;
+    cachedSessionNameLeafId = undefined;
+    cachedSessionName = undefined;
+  }
+
   pi.registerFlag(FLAG, {
     description: "Start with OpenAI fast mode enabled (service_tier=priority)",
     type: "boolean",
@@ -352,19 +409,6 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       await usageController.refresh(ctx, ctx.model?.id, { notify: true, force: true });
     },
   });
-
-  function textPanel(title: string, lines: string[], done: () => void) {
-    return {
-      render(width: number) {
-        const clipped = lines.map((line) => truncateToWidth(line, width, "..."));
-        return [title, "", ...clipped, "", "Esc/q to go back"];
-      },
-      invalidate() {},
-      handleInput(data: string) {
-        if (data.includes("\x1b") || data === "escape" || data === "q" || data === "\x03") done();
-      },
-    };
-  }
 
   function buildPetSettingsItems(cfg: ResolvedConfig): SettingsPickerItem[] {
     return settingsItemsFromDescriptors(PET_SETTING_DESCRIPTORS, cfg, {
@@ -608,10 +652,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     });
   }
 
-  function buildFastSettingsItems(
-    ctx: ExtensionContext,
-    cfg: ResolvedConfig,
-  ): SettingsPickerItem[] {
+  function buildFastSettingsItems(cfg: ResolvedConfig): SettingsPickerItem[] {
     return [
       {
         id: "fast.enabled",
@@ -659,11 +700,13 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
         id: "config.print",
         label: "Print config",
         currentValue: "open",
-        description: "Show the selected raw config JSON.",
+        description: "Show the selected config JSON with sensitive fields redacted.",
         submenu: (_value, done) =>
           textPanel(
             "Config",
-            JSON.stringify(readRawConfig(cfg.configPath), null, 2).split("\n"),
+            JSON.stringify(redactDiagnosticValue(readRawConfig(cfg.configPath)), null, 2).split(
+              "\n",
+            ),
             () => done(),
           ),
       },
@@ -680,7 +723,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
         submenu: (_value, done) =>
           settingsSubmenu(
             "Fast mode settings",
-            () => buildFastSettingsItems(ctx, config(ctx)),
+            () => buildFastSettingsItems(config(ctx)),
             ctx,
             () => done(fastSettingsSummary(ctx, config(ctx))),
           ),
@@ -803,6 +846,10 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   }
 
   async function showSettingsPicker(ctx: ExtensionContext): Promise<void> {
+    if (!hasTerminalUI(ctx)) {
+      ctx.ui.notify("Better OpenAI settings require interactive TUI mode.", "warning");
+      return;
+    }
     try {
       petController.settingsPets = await listCodexPets();
     } catch {
@@ -887,7 +934,12 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
         slug: selectedPet.slug,
       });
       updateFooter(ctx);
-      await petController.refresh(ctx, next, true);
+      if (hasTerminalUI(ctx)) await petController.refresh(ctx, next, true);
+      else
+        ctx.ui.notify(
+          `Enabled ${selectedPet.name} (${selectedPet.slug}); footer pets render in interactive TUI mode.`,
+          "info",
+        );
     },
     tuck: (ctx) => {
       writePetConfig(ctx, { enabled: false });
@@ -912,8 +964,14 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
 
       const next = writePetConfig(ctx, { slug: selectedPet.slug });
       updateFooter(ctx);
-      if (petController.shouldLoadForConfig(next)) await petController.refresh(ctx, next, true);
-      else {
+      if (petController.shouldLoadForConfig(next)) {
+        if (hasTerminalUI(ctx)) await petController.refresh(ctx, next, true);
+        else
+          ctx.ui.notify(
+            `Selected ${selectedPet.name} (${selectedPet.slug}); footer pets render in interactive TUI mode.`,
+            "info",
+          );
+      } else {
         ctx.ui.notify(
           `Selected ${selectedPet.name} (${selectedPet.slug}) for the footer pet. Use /pets wake to show it.`,
           "info",
@@ -966,8 +1024,8 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
           const branch = footerData.getGitBranch?.();
           if (branch) pwd = `${pwd} (${branch})`;
 
-          const sessionName = ctx.sessionManager.getSessionName();
-          if (sessionName) pwd = `${pwd} • ${sessionName}`;
+          const currentSessionName = sessionName(ctx);
+          if (currentSessionName) pwd = `${pwd} • ${currentSessionName}`;
 
           const parts: string[] = [];
           if (totalInput) parts.push(`↑${formatTokens(totalInput)}`);
@@ -979,11 +1037,11 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
           if (totalCost || usingSubscription)
             parts.push(`$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
 
-          const contextUsage = ctx.getContextUsage();
-          const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
-          const contextPercentValue = contextUsage?.percent ?? 0;
+          const currentContextUsage = contextUsage(ctx);
+          const contextWindow = currentContextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+          const contextPercentValue = currentContextUsage?.percent ?? 0;
           const contextPercent =
-            contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
+            currentContextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
           const contextDisplay =
             contextPercent === "?"
               ? `?/${formatTokens(contextWindow)} (auto)`
@@ -997,12 +1055,11 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
           parts.push(contextText);
 
           const cfg = config(ctx);
-          const cfgForPets = cfg;
-          const shouldRenderPet = petController.shouldRenderInFooter(cfgForPets);
-          const requestedPetPlacement = cfgForPets.pets.placement;
+          const shouldRenderPet = petController.shouldRenderInFooter(cfg);
+          const requestedPetPlacement = cfg.pets.placement;
           const requestedPetSizeCells = petSizeCellsForPlacement(
             requestedPetPlacement,
-            cfgForPets.pets.sizeCells,
+            cfg.pets.sizeCells,
           );
           const inlinePet = Boolean(
             shouldRenderPet &&
@@ -1010,11 +1067,11 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
             isInlinePetPlacement(requestedPetPlacement) &&
             width >= requestedPetSizeCells + 32,
           );
-          const petRenderSizeCells = inlinePet ? requestedPetSizeCells : cfgForPets.pets.sizeCells;
+          const petRenderSizeCells = inlinePet ? requestedPetSizeCells : cfg.pets.sizeCells;
           const petColumnWidth = Math.min(petRenderSizeCells, Math.max(1, width - 1));
           const footerTextWidth = inlinePet ? Math.max(1, width - petColumnWidth - 2) : width;
 
-          const usageStatusLine = usageController.statusLine(ctx, cfg);
+          const usageStatusLine = usageController.statusLine(ctx, cfg, usingSubscription);
           const usageLine = usageStatusLine ? theme.fg("dim", usageStatusLine) : undefined;
 
           let statsLeft = parts.join(" ");
@@ -1027,7 +1084,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
           const modelName = ctx.model?.id || "no-model";
           const thinkingLevel = pi.getThinkingLevel();
           const fastSuffix =
-            fastController.active && supportsFast(ctx, config(ctx).supportedModels) ? " fast" : "";
+            fastController.active && supportsFast(ctx, cfg.supportedModels) ? " fast" : "";
           let rightWithoutProvider = modelName;
           if (ctx.model?.reasoning) {
             rightWithoutProvider =
@@ -1084,7 +1141,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
             textLines.push(truncateToWidth(statusLine, footerTextWidth, theme.fg("dim", "...")));
           }
 
-          const petLines = petController.renderPetLines(ctx, cfgForPets, {
+          const petLines = petController.renderPetLines(ctx, cfg, {
             shouldRenderPet,
             freezePetFrame,
             requestedPetPlacement,
@@ -1140,6 +1197,18 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
 
   function updateFooter(ctx: ExtensionContext): void {
     const cfg = config(ctx);
+
+    if (!hasTerminalUI(ctx)) {
+      if (cfg.footer.mode === "off") {
+        setStatus(ctx, undefined);
+        return;
+      }
+      const fast = fastController.statusSegment(ctx, cfg);
+      const usage = usageController.statusLine(ctx, cfg);
+      setStatus(ctx, [fast, usage].filter(Boolean).join(" | ") || undefined);
+      return;
+    }
+
     petController.updateActivity(ctx, cfg);
     const shouldRenderPet = petController.shouldRenderInFooter(cfg);
 
@@ -1162,6 +1231,8 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   }
 
   pi.on("session_start", (_event, ctx) => {
+    invalidateContextUsage();
+    invalidateSessionName();
     const nextConfig = refresh(ctx);
     fastController.initializeForSession(ctx, nextConfig, pi.getFlag(FLAG) === true);
     if (
@@ -1172,15 +1243,16 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     if (fastController.desiredActive && !fastController.active) {
       ctx.ui.notify(fastController.unsupportedRequestMessage(ctx, nextConfig), "warning");
     }
-    petController.installResizeGuard(ctx);
+    if (hasTerminalUI(ctx)) petController.installResizeGuard(ctx);
     refreshFooterTotals(ctx);
     updateFooter(ctx);
-    if (nextConfig.pets.enabled) void petController.refresh(ctx, nextConfig);
+    if (hasTerminalUI(ctx) && nextConfig.pets.enabled) void petController.refresh(ctx, nextConfig);
     usageController.start(ctx);
     if (fastController.active) ctx.ui.notify(fastController.stateText(ctx, nextConfig), "info");
   });
 
   pi.on("agent_start", (_event, ctx) => {
+    invalidateContextUsage();
     petController.agentStart(ctx);
     updateFooter(ctx);
   });
@@ -1200,13 +1272,21 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     updateFooter(ctx);
   });
 
-  pi.on("turn_end", (_event, ctx) => {
-    refreshFooterTotals(ctx);
+  pi.on("turn_end", (event, ctx) => {
+    invalidateContextUsage();
+    if (event.message?.role === "assistant") {
+      footerTotals.input += event.message.usage.input;
+      footerTotals.output += event.message.usage.output;
+      footerTotals.cacheRead += event.message.usage.cacheRead;
+      footerTotals.cacheWrite += event.message.usage.cacheWrite;
+      footerTotals.cost += event.message.usage.cost.total;
+    } else refreshFooterTotals(ctx);
     updateFooter(ctx);
     void usageController.refresh(ctx);
   });
 
   pi.on("session_compact", (_event, ctx) => {
+    invalidateContextUsage();
     refreshFooterTotals(ctx);
     petController.queueKittyCleanup();
     petController.resetRenderCache();
@@ -1214,6 +1294,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   });
 
   pi.on("session_tree", (_event, ctx) => {
+    invalidateContextUsage();
     refreshFooterTotals(ctx);
     petController.queueKittyCleanup();
     petController.resetRenderCache();
@@ -1221,6 +1302,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   });
 
   pi.on("model_select", (event, ctx) => {
+    invalidateContextUsage();
     const cfg = config(ctx);
     const wasActive = fastController.active;
     fastController.applyDesiredState(ctx, cfg);
@@ -1238,6 +1320,8 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", () => {
+    invalidateContextUsage();
+    invalidateSessionName();
     usageController.shutdown();
     petController.shutdown();
   });
@@ -1245,6 +1329,10 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   pi.on("before_provider_request", (event, ctx) => {
     return fastController.injectProviderPayload(event, ctx, config(ctx));
   });
+
+  pi.on("message_start", invalidateContextUsage);
+  pi.on("message_update", invalidateContextUsage);
+  pi.on("message_end", invalidateContextUsage);
 }
 
 export const _test = {
@@ -1273,6 +1361,7 @@ export const _test = {
   formatPercent,
   formatUsageSnapshot,
   readCodexAuth,
+  textPanel,
   imageTest: _imageTest,
   petsTest: _petsTest,
 };

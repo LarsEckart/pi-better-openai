@@ -2,7 +2,7 @@ import { constants, type Dirent } from "node:fs";
 import { access, lstat, readdir, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   calculateImageRows,
   getCapabilities,
@@ -12,7 +12,7 @@ import {
   truncateToWidth,
   type AutocompleteItem,
   type ImageTheme,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 import sharp from "sharp";
 import { isRecord, type PetState } from "./config.ts";
 
@@ -25,6 +25,7 @@ const DEFAULT_SPRITESHEET_PATH = "spritesheet.webp";
 const EXPECTED_ATLAS_WIDTH = DEFAULT_CELL_WIDTH * PET_COLUMNS;
 const EXPECTED_ATLAS_HEIGHT = DEFAULT_CELL_HEIGHT * PET_ROWS;
 const PET_CATALOG_CACHE_TTL_MS = 1500;
+const PET_CATALOG_READ_CONCURRENCY = 4;
 
 type ListCodexPetsOptions = { refresh?: boolean };
 
@@ -61,8 +62,8 @@ export type CodexPetPackage = {
 export type PetFrame = {
   data?: string;
   rawRgbaData?: string;
+  kittyUpload?: string;
   kittyImageId?: number;
-  kittyUploaded?: boolean;
   mimeType: "image/png";
   durationMs: number;
   widthPx: number;
@@ -265,6 +266,25 @@ async function readCodexPetPackage(
   };
 }
 
+async function readCodexPetPackages(
+  petsDir: string,
+  entries: Dirent[],
+  options: { validateSpritesheet: boolean },
+): Promise<CodexPetPackage[]> {
+  const pets: Array<CodexPetPackage | undefined> = Array.from({ length: entries.length });
+  let nextIndex = 0;
+  const readNext = async (): Promise<void> => {
+    while (nextIndex < entries.length) {
+      const index = nextIndex++;
+      pets[index] = await readCodexPetPackage(petsDir, entries[index], options);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(PET_CATALOG_READ_CONCURRENCY, entries.length) }, readNext),
+  );
+  return pets.filter((pet): pet is CodexPetPackage => pet !== undefined);
+}
+
 export async function listCodexPets(
   home = codexHome(),
   options: ListCodexPetsOptions = {},
@@ -274,22 +294,22 @@ export async function listCodexPets(
   if (!options.refresh && cached && cached.expiresAt > Date.now()) return cached.pets;
 
   const { dir, entries } = await readPetDirectoryEntries(home);
-  const pets: CodexPetPackage[] = [];
-  for (const entry of entries) {
-    const pet = await readCodexPetPackage(dir, entry, { validateSpritesheet: true });
-    if (pet) pets.push(pet);
-  }
+  const pets = await readCodexPetPackages(dir, entries, { validateSpritesheet: true });
   pets.sort((a, b) => a.name.localeCompare(b.name));
   petCatalogCache.set(cacheKey, { expiresAt: Date.now() + PET_CATALOG_CACHE_TTL_MS, pets });
   return pets;
 }
 
-function petLookupKey(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+export function petLookupKey(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\p{M}]+/gu, "");
 }
 
 type PetLookupRequest = {
   hasText: boolean;
+  exact?: string;
   key?: string;
 };
 
@@ -297,7 +317,11 @@ function petLookupRequest(value?: string): PetLookupRequest {
   const requestedText = value?.trim();
   if (!requestedText) return { hasText: false };
 
-  return { hasText: true, key: petLookupKey(requestedText) || undefined };
+  return {
+    hasText: true,
+    exact: requestedText.normalize("NFKC").toLowerCase(),
+    key: petLookupKey(requestedText) || undefined,
+  };
 }
 
 function petMatchesLookup(pet: CodexPetPackage, requested: string): boolean {
@@ -308,11 +332,35 @@ function petMatchesLookup(pet: CodexPetPackage, requested: string): boolean {
   );
 }
 
+function exactPetMatches(
+  pets: CodexPetPackage[],
+  requested: string,
+): CodexPetPackage[] | undefined {
+  const fields: Array<(pet: CodexPetPackage) => string | undefined> = [
+    (pet) => pet.slug,
+    (pet) => pet.id,
+    (pet) => pet.name,
+  ];
+  for (const field of fields) {
+    const matches = pets.filter((pet) => field(pet)?.normalize("NFKC").toLowerCase() === requested);
+    if (matches.length > 0) return matches;
+  }
+  return undefined;
+}
+
+function uniquePetMatch(pets: CodexPetPackage[]): CodexPetPackage | undefined {
+  return pets.length === 1 ? pets[0] : undefined;
+}
+
 export function findCodexPet(pets: CodexPetPackage[], value?: string): CodexPetPackage | undefined {
   const request = petLookupRequest(value);
   const { key } = request;
   if (!key) return undefined;
-  return pets.find((pet) => petMatchesLookup(pet, key));
+  if (request.exact) {
+    const exactMatches = exactPetMatches(pets, request.exact);
+    if (exactMatches) return uniquePetMatch(exactMatches);
+  }
+  return uniquePetMatch(pets.filter((pet) => petMatchesLookup(pet, key)));
 }
 
 export function findReadyCodexPet(
@@ -324,7 +372,14 @@ export function findReadyCodexPet(
 
   const { key } = request;
   if (!key) return undefined;
-  return pets.find((pet) => pet.hasSpritesheet && petMatchesLookup(pet, key));
+  if (request.exact) {
+    const exactMatches = exactPetMatches(pets, request.exact);
+    if (exactMatches) {
+      const exact = uniquePetMatch(exactMatches);
+      return exact?.hasSpritesheet ? exact : undefined;
+    }
+  }
+  return uniquePetMatch(pets.filter((pet) => pet.hasSpritesheet && petMatchesLookup(pet, key)));
 }
 
 function selectPet(pets: CodexPetPackage[], slug?: string): CodexPetPackage | undefined {
@@ -431,18 +486,15 @@ async function findCodexPetDirect(
   const request = petLookupRequest(slug);
   if (!request.key) return undefined;
   const { dir, entries } = await readPetDirectoryEntries(home);
-  for (const entry of entries) {
-    const candidate = await readCodexPetPackage(dir, entry, { validateSpritesheet: false });
-    if (!candidate || !petMatchesLookup(candidate, request.key)) continue;
-    if (candidate.spritesheetIssue) return candidate;
-    const spritesheetIssue = await validatePetSpritesheet(candidate.dir, candidate.spritesheetPath);
-    return {
-      ...candidate,
-      hasSpritesheet: spritesheetIssue === undefined,
-      spritesheetIssue,
-    };
-  }
-  return undefined;
+  const candidates = await readCodexPetPackages(dir, entries, { validateSpritesheet: false });
+  const candidate = findCodexPet(candidates, slug);
+  if (!candidate || candidate.spritesheetIssue) return candidate;
+  const spritesheetIssue = await validatePetSpritesheet(candidate.dir, candidate.spritesheetPath);
+  return {
+    ...candidate,
+    hasSpritesheet: spritesheetIssue === undefined,
+    spritesheetIssue,
+  };
 }
 
 export async function loadCodexPet(
@@ -513,12 +565,20 @@ export async function loadCodexPet(
           kernel: sharp.kernel.nearest,
         });
       }
+      const kittyImageId = useKitty ? kittyImageBase + kittyFrameOffset++ : undefined;
       const encoded = useKitty
-        ? { rawRgbaData: (await frame.clone().ensureAlpha().raw().toBuffer()).toString("base64") }
-        : { data: (await frame.clone().png().toBuffer()).toString("base64") };
+        ? {
+            kittyUpload: encodeKittyRawRgbaData(
+              (await frame.ensureAlpha().raw().toBuffer()).toString("base64"),
+              outputWidthPx,
+              outputHeightPx,
+              kittyImageId!,
+            ),
+          }
+        : { data: (await frame.png().toBuffer()).toString("base64") };
       states[state].push({
         ...encoded,
-        kittyImageId: useKitty ? kittyImageBase + kittyFrameOffset++ : undefined,
+        kittyImageId,
         mimeType: "image/png",
         durationMs,
         widthPx: outputWidthPx,
@@ -575,12 +635,6 @@ function forEachCodexPetFrame(
   }
 }
 
-function markCodexPetKittyFramesUnuploaded(pet?: LoadedCodexPet): void {
-  forEachCodexPetFrame(pet, (frame) => {
-    frame.kittyUploaded = false;
-  });
-}
-
 function codexPetKittyImageIds(pet?: LoadedCodexPet): number[] {
   const imageIds = new Set<number>();
   forEachCodexPetFrame(pet, (frame) => {
@@ -601,18 +655,15 @@ function placeKittyImage(imageId: number, columns: number, rows: number): string
   return `\x1b_Ga=p,i=${imageId},p=1,c=${columns},r=${rows},q=2,C=1\x1b\\`;
 }
 
-function encodeKittyRawRgba(frame: PetFrame, imageId: number): string {
-  const rawRgbaData = frame.rawRgbaData;
+function encodeKittyRawRgbaData(
+  rawRgbaData: string,
+  widthPx: number,
+  heightPx: number,
+  imageId: number,
+): string {
   if (!rawRgbaData) return "";
   const chunkSize = 4096;
-  const params = [
-    "a=t",
-    "f=32",
-    `s=${frame.widthPx}`,
-    `v=${frame.heightPx}`,
-    `i=${imageId}`,
-    "q=2",
-  ].join(",");
+  const params = ["a=t", "f=32", `s=${widthPx}`, `v=${heightPx}`, `i=${imageId}`, "q=2"].join(",");
   if (rawRgbaData.length <= chunkSize) {
     return `\x1b_G${params};${rawRgbaData}\x1b\\`;
   }
@@ -628,6 +679,15 @@ function encodeKittyRawRgba(frame: PetFrame, imageId: number): string {
   return chunks.join("");
 }
 
+function encodeKittyRawRgba(frame: PetFrame, imageId: number): string {
+  return (
+    frame.kittyUpload ??
+    (frame.rawRgbaData
+      ? encodeKittyRawRgbaData(frame.rawRgbaData, frame.widthPx, frame.heightPx, imageId)
+      : "")
+  );
+}
+
 export class CodexPetKittyManager {
   private previousFrameImageId: number | undefined;
   private readonly pendingCleanupImageIds = new Set<number>();
@@ -641,7 +701,6 @@ export class CodexPetKittyManager {
   invalidate(pet?: LoadedCodexPet): void {
     this.queueCleanup(pet);
     this.previousFrameImageId = undefined;
-    markCodexPetKittyFramesUnuploaded(pet);
   }
 
   resetForResize(pet?: LoadedCodexPet): void {
@@ -683,7 +742,6 @@ export class CodexPetKittyManager {
     // occasionally invisible pet. The TUI diff still avoids writing this payload
     // again when the rendered line is unchanged.
     const upload = encodeKittyRawRgba(frame, frameImageId);
-    frame.kittyUploaded = true;
     this.previousFrameImageId = frameImageId;
     // Recent pi-tui versions automatically free Kitty image IDs they own on changed lines.
     // Pet frames are managed here and intentionally reused across animation loops, so keep
@@ -716,7 +774,6 @@ function defaultKittyManager(placementImageId: number): CodexPetKittyManager {
 export function resetCodexPetKittyCache(pet?: LoadedCodexPet, placementImageId?: number): void {
   if (placementImageId !== undefined) defaultKittyManagers.get(placementImageId)?.invalidate(pet);
   else for (const manager of defaultKittyManagers.values()) manager.invalidate(pet);
-  markCodexPetKittyFramesUnuploaded(pet);
 }
 
 export function renderCodexPetFrame(

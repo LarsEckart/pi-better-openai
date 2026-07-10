@@ -23,7 +23,7 @@ Usage display and image generation require pi's `openai-codex` OAuth credentials
 1. In pi, run `/login openai-codex`.
 2. Verify subscription usage with `/openai-usage`, or open `/openai-settings` and check **Diagnostics**.
 3. The extension reads auth from pi's agent auth store, normally `~/.pi/agent/auth.json`. Do not copy, paste, or commit values from this file.
-4. If `PI_CODING_AGENT_DIR` is set, the auth store and global generated-image directory use that agent directory instead of `~/.pi/agent`.
+4. If `PI_CODING_AGENT_DIR` is set, the auth store, global extension config, and global generated-image directory use that agent directory instead of `~/.pi/agent`. A leading `~/` is expanded to your home directory.
 
 ## Features
 
@@ -45,7 +45,7 @@ Usage display and image generation require pi's `openai-codex` OAuth credentials
 The extension reads JSON config from two locations:
 
 - Project config: `.pi/extensions/pi-better-openai.json`
-- Global config: `~/.pi/agent/extensions/pi-better-openai.json`
+- Global config: `$PI_CODING_AGENT_DIR/extensions/pi-better-openai.json`, defaulting to `~/.pi/agent/extensions/pi-better-openai.json`
 
 Project overrides global. Global values fill fields omitted by the project file. Invalid enum values are ignored, and numeric settings are clamped to safe ranges.
 
@@ -105,7 +105,7 @@ Agents can call the `openai_image` tool directly. Supported parameters:
 
 - `prompt` (required): pass the user's image wording verbatim.
 - `action`: `auto`, `generate`, or `edit`.
-- `images`: project-local reference/edit image paths. Paths must stay inside the current workspace and point to readable PNG, JPEG, WebP, or GIF files.
+- `images`: up to five distinct project-local reference/edit image paths. Paths must stay inside the current workspace and point to readable PNG, JPEG, WebP, or GIF files; each file is limited to 20 MB and the combined input to 50 MB.
 - `model`: Codex image model override, for example `openai-codex/gpt-5.5`.
 - `outputFormat`: `png`, `jpeg`, or `webp`.
 - `save`: `project`, `global`, `custom`, or `none`.
@@ -115,7 +115,7 @@ Save modes:
 
 - `project` writes to `.pi/generated-images/` in the current project.
 - `global` writes to the agent `generated-images` directory, normally `~/.pi/agent/generated-images/` or `$PI_CODING_AGENT_DIR/generated-images/`.
-- `custom` writes to `saveDir` or `PI_IMAGE_SAVE_DIR`.
+- `custom` writes to `saveDir` or `PI_IMAGE_SAVE_DIR`; relative paths are resolved from the current project.
 - `none` returns the image without saving it.
 
 The repository ignores `.pi/`, so generated images and local config should not be committed.

@@ -24,8 +24,10 @@ function withTempDir<T>(run: (tempDir: string) => T): T {
 function withHome<T>(home: string, run: () => T): T {
   const previousHome = process.env.HOME;
   const previousUserProfile = process.env.USERPROFILE;
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   process.env.HOME = home;
   process.env.USERPROFILE = home;
+  delete process.env.PI_CODING_AGENT_DIR;
   try {
     return run();
   } finally {
@@ -33,6 +35,8 @@ function withHome<T>(home: string, run: () => T): T {
     else process.env.HOME = previousHome;
     if (previousUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = previousUserProfile;
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
   }
 }
 
@@ -63,6 +67,14 @@ describe("config helpers", () => {
     });
     expect(_test.parseModelKey("bad")).toBeUndefined();
     expect(_test.normalizeModelKeys(["openai/gpt-5.5", "bad", 42])).toEqual(["openai/gpt-5.5"]);
+  });
+
+  test("uses PI_CODING_AGENT_DIR for global config and expands a home-relative path", () => {
+    expect(
+      _test.configPaths("/project", "/home/alice", {
+        PI_CODING_AGENT_DIR: "~/custom-agent",
+      }).global,
+    ).toBe("/home/alice/custom-agent/extensions/pi-better-openai.json");
   });
 
   test("preserves unknown config fields while writing updates", () => {

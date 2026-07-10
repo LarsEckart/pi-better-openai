@@ -1,8 +1,25 @@
+import {
+  truncateToWidth as truncateTerminalText,
+  visibleWidth as terminalVisibleWidth,
+} from "@earendil-works/pi-tui";
+
 const ANSI_ESCAPE_PATTERN = String.raw`\u001B\[[0-?]*[ -/]*[@-~]`;
 const ANSI_ESCAPE_REGEXP = new RegExp(ANSI_ESCAPE_PATTERN, "g");
-const LEADING_ANSI_ESCAPE_REGEXP = new RegExp(`^(?:${ANSI_ESCAPE_PATTERN})+`);
-const TRAILING_ANSI_ESCAPE_REGEXP = new RegExp(`(?:${ANSI_ESCAPE_PATTERN})+$`);
 const DIAGNOSTIC_MAX_LENGTH = 500;
+const REDACTED = "[REDACTED]";
+const SENSITIVE_DIAGNOSTIC_KEY_SUFFIXES = [
+  "token",
+  "apikey",
+  "accesskey",
+  "authorization",
+  "password",
+  "passwd",
+  "secret",
+  "privatekey",
+  "credential",
+  "credentials",
+  "accountid",
+] as const;
 
 function replaceControlCharacters(value: string): string {
   let result = "";
@@ -18,23 +35,11 @@ export function stripAnsi(value: string): string {
 }
 
 export function visibleWidth(value: string): number {
-  return stripAnsi(value).length;
-}
-
-function leadingAnsi(value: string): string {
-  return value.match(LEADING_ANSI_ESCAPE_REGEXP)?.[0] ?? "";
-}
-
-function trailingAnsi(value: string): string {
-  return value.match(TRAILING_ANSI_ESCAPE_REGEXP)?.[0] ?? "";
+  return terminalVisibleWidth(value);
 }
 
 export function truncateToWidth(value: string, width: number, ellipsis = "..."): string {
-  if (visibleWidth(value) <= width) return value;
-  if (width <= 0) return "";
-  const plain = stripAnsi(value);
-  if (width <= ellipsis.length) return ellipsis.slice(0, width);
-  return `${leadingAnsi(value)}${plain.slice(0, Math.max(0, width - ellipsis.length))}${ellipsis}${trailingAnsi(value)}`;
+  return truncateTerminalText(value, width, ellipsis);
 }
 
 export function formatTokens(count: number): string {
@@ -46,10 +51,7 @@ export function formatTokens(count: number): string {
 }
 
 export function sanitizeStatusText(text: string): string {
-  return text
-    .replace(/[\r\n\t]/g, " ")
-    .replace(/ +/g, " ")
-    .trim();
+  return text.replace(/[ \r\n\t]+/g, " ").trim();
 }
 
 export function maskIdentifier(value: string | undefined): string | undefined {
@@ -76,4 +78,27 @@ export function sanitizeDiagnosticError(
   const sanitized = redacted || "Unknown error.";
   if (sanitized.length <= maxLength) return sanitized;
   return `${sanitized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function isSensitiveDiagnosticKey(key: string): boolean {
+  const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return (
+    normalized === "access" ||
+    normalized === "auth" ||
+    normalized === "refresh" ||
+    SENSITIVE_DIAGNOSTIC_KEY_SUFFIXES.some((suffix) => normalized.endsWith(suffix))
+  );
+}
+
+export function redactDiagnosticValue(value: unknown): unknown {
+  if (typeof value === "string") return sanitizeDiagnosticError(value);
+  if (Array.isArray(value)) return value.map(redactDiagnosticValue);
+  if (typeof value !== "object" || value === null) return value;
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [
+      key,
+      isSensitiveDiagnosticKey(key) ? REDACTED : redactDiagnosticValue(entry),
+    ]),
+  );
 }

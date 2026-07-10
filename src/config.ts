@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { CONFIG_BASENAME, logPrefix } from "./identity.ts";
+import { piAgentDir } from "./paths.ts";
 
 export const FOOTER_MODES = ["replace", "status", "off"] as const;
 export const IMAGE_SAVE_MODES = ["none", "project", "global", "custom"] as const;
@@ -409,10 +410,10 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function configPaths(cwd: string, home = homedir()) {
+export function configPaths(cwd: string, home = homedir(), env = process.env) {
   return {
     project: join(cwd, ".pi", "extensions", CONFIG_BASENAME),
-    global: join(home, ".pi", "agent", "extensions", CONFIG_BASENAME),
+    global: join(piAgentDir(env, home), "extensions", CONFIG_BASENAME),
   };
 }
 

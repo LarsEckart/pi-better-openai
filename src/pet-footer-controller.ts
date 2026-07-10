@@ -1,5 +1,5 @@
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { calculateImageRows, getCapabilities, getCellDimensions } from "@mariozechner/pi-tui";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { calculateImageRows, getCapabilities, getCellDimensions } from "@earendil-works/pi-tui";
 import type { PetPlacement, PetState, ResolvedConfig } from "./config.ts";
 import {
   animationFrameAt,
@@ -165,6 +165,7 @@ export class PetFooterController {
     this.petSettingsPreviewActive = next;
     if (!this.getConfig(ctx).pets.enabled) this.petLoadKey = undefined;
     void this.refresh(ctx, this.getConfig(ctx)).then(() => {
+      if (this.shuttingDown) return;
       if (!this.shouldRenderInFooter(this.getConfig(ctx))) this.flushKittyCleanupNow();
       this.requestSettingsRender?.();
     });
@@ -376,8 +377,12 @@ export class PetFooterController {
   updateActivity(ctx: ExtensionContext, cfg: ResolvedConfig): void {
     const resizeFrozen = this.isResizeFrozen();
     const shouldAnimatePet = this.shouldLoadForConfig(cfg);
-    this.stopAnimation();
-    if (shouldAnimatePet && !resizeFrozen) this.startAnimation(ctx);
+    if (!shouldAnimatePet || resizeFrozen) {
+      this.stopAnimation();
+    } else {
+      if (this.currentState(ctx, cfg) !== this.petAnimationState) this.stopAnimation();
+      this.startAnimation(ctx);
+    }
     if (!resizeFrozen && this.shouldRunIdleEmotes(ctx, cfg)) this.scheduleIdleEmote(ctx, cfg);
     else this.stopIdleEmotes();
   }
@@ -552,20 +557,22 @@ export class PetFooterController {
           ),
         );
       } else {
-        const { frameIndex } = petFrameInfo(this.pet, petState, elapsedMs);
-        const cacheKey = petRenderCacheKey(
-          this.pet,
-          petState,
-          frameIndex,
-          options.requestedPetPlacement,
-          options.petColumnWidth,
-          options.petRenderSizeCells,
-        );
-        const cachedPetLines = this.petRenderCache.get(cacheKey);
         const imageProtocol = getCapabilities().images;
-        if (cachedPetLines) {
-          petLines.push(...cachedPetLines);
-        } else {
+        if (imageProtocol !== null && imageProtocol !== "kitty") {
+          const { frameIndex } = petFrameInfo(this.pet, petState, elapsedMs);
+          const cacheKey = petRenderCacheKey(
+            this.pet,
+            petState,
+            frameIndex,
+            options.requestedPetPlacement,
+            options.petColumnWidth,
+            options.petRenderSizeCells,
+          );
+          const cachedPetLines = this.petRenderCache.get(cacheKey);
+          if (cachedPetLines) {
+            petLines.push(...cachedPetLines);
+            return petLines;
+          }
           const renderedPetLines = renderCodexPetFrame(
             this.pet,
             petState,
@@ -580,10 +587,17 @@ export class PetFooterController {
             },
           );
           petLines.push(...renderedPetLines);
-          if (renderedPetLines.length > 0) {
-            if (imageProtocol !== null && imageProtocol !== "kitty")
-              this.rememberRender(cacheKey, renderedPetLines);
-          }
+          if (renderedPetLines.length > 0) this.rememberRender(cacheKey, renderedPetLines);
+        } else {
+          petLines.push(
+            ...renderCodexPetFrame(this.pet, petState, options.petColumnWidth, options.theme, {
+              sizeCells: options.petRenderSizeCells,
+              imageId: this.petImageId,
+              now: elapsedMs,
+              durationMultiplier: 1,
+              kittyManager: this.petKittyManager,
+            }),
+          );
         }
       }
     } else if (this.petError) {
@@ -607,5 +621,7 @@ export class PetFooterController {
     this.stopIdleEmotes();
     this.stopAnimation();
     this.stopPendingRenderRequest();
+    this.requestFooterRender = undefined;
+    this.requestSettingsRender = undefined;
   }
 }

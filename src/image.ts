@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join, resolve, sep } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Box, Container, Image, Text } from "@earendil-works/pi-tui";
 import sharp from "sharp";
 import type { ResolvedConfig } from "./config.ts";
 import { isRecord } from "./config.ts";
@@ -12,13 +13,17 @@ import {
   type CodexCredentialsWithSource,
 } from "./codex-auth.ts";
 import { maskIdentifier, sanitizeDiagnosticError } from "./format.ts";
+import { piAgentDir, resolveUserPath } from "./paths.ts";
 
 const OPENAI_IMAGE_TOOL = "openai_image";
 const OPENAI_IMAGE_COMMAND = "openai-image";
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const DEFAULT_TIMEOUT_MS = 180_000;
 const MAX_IMAGE_INPUT_BYTES = 20 * 1024 * 1024;
+const MAX_IMAGE_INPUTS = 5;
+const MAX_TOTAL_IMAGE_INPUT_BYTES = 50 * 1024 * 1024;
 const SUPPORTED_INPUT_IMAGE_FORMATS = new Set(["png", "jpeg", "jpg", "webp", "gif"]);
+const SSE_EVENT_BOUNDARY = /\r?\n\r?\n/;
 
 export const IMAGE_SAVE_MODES = ["none", "project", "global", "custom"] as const;
 export const IMAGE_ACTIONS = ["auto", "generate", "edit"] as const;
@@ -44,6 +49,7 @@ const TOOL_PARAMS = {
     },
     images: {
       type: "array",
+      maxItems: MAX_IMAGE_INPUTS,
       items: { type: "string" },
       description: "Local image paths to use as edit targets or references.",
     },
@@ -116,8 +122,11 @@ export type ImageGenerationDebug = {
   lastError?: string;
 };
 
-async function getCredentials(ctx: ExtensionContext): Promise<CodexImageCredentials> {
-  const credentials = await getCodexCredentials(ctx);
+async function getCredentials(
+  ctx: ExtensionContext,
+  signal?: AbortSignal,
+): Promise<CodexImageCredentials> {
+  const credentials = await getCodexCredentials(ctx, signal);
   if (credentials) return credentials;
   throw new Error("Missing openai-codex OAuth credentials. Run /login openai-codex.");
 }
@@ -141,12 +150,14 @@ function resolveImageConfig(cfg: ResolvedConfig, params: ToolParams) {
 }
 
 function imageMimeType(path: string, outputFormat?: string): string {
+  if (outputFormat === "jpeg" || outputFormat === "jpg") return "image/jpeg";
+  if (outputFormat === "webp") return "image/webp";
+  if (outputFormat === "gif") return "image/gif";
+  if (outputFormat === "png") return "image/png";
   const ext = extname(path).toLowerCase();
   if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
   if (ext === ".webp") return "image/webp";
   if (ext === ".gif") return "image/gif";
-  if (outputFormat === "jpeg") return "image/jpeg";
-  if (outputFormat === "webp") return "image/webp";
   return "image/png";
 }
 
@@ -162,15 +173,17 @@ function isInsideDirectory(root: string, child: string): boolean {
   );
 }
 
-async function validateImageInput(path: string, workspaceRoot: string): Promise<void> {
-  const realWorkspaceRoot = await realpath(workspaceRoot).catch(() => workspaceRoot);
+async function validateImageInput(
+  path: string,
+  realWorkspaceRoot: string,
+): Promise<{ mimeType: string; path: string; size: number }> {
   const realInputPath = await realpath(path).catch(() => undefined);
   if (!realInputPath || !isInsideDirectory(realWorkspaceRoot, realInputPath))
     throw new Error(
       `Image input must be a file inside the current workspace: ${displayPath(path)}`,
     );
 
-  const pathStats = await stat(path).catch(() => undefined);
+  const pathStats = await stat(realInputPath).catch(() => undefined);
   if (!pathStats?.isFile())
     throw new Error(
       `Image input must be a file inside the current workspace: ${displayPath(path)}`,
@@ -178,16 +191,24 @@ async function validateImageInput(path: string, workspaceRoot: string): Promise<
   if (pathStats.size > MAX_IMAGE_INPUT_BYTES)
     throw new Error(`Image input is too large (max 20 MB): ${displayPath(path)}`);
 
-  const metadata = await sharp(path, { animated: false })
+  const metadata = await sharp(realInputPath, { animated: false })
     .metadata()
     .catch(() => undefined);
   if (!metadata?.format || !SUPPORTED_INPUT_IMAGE_FORMATS.has(metadata.format))
     throw new Error(`Image input is not a readable image: ${displayPath(path)}`);
+  return {
+    mimeType: imageMimeType(path, metadata.format),
+    path: realInputPath,
+    size: pathStats.size,
+  };
 }
 
 async function readImageInputs(paths: string[] | undefined, cwd: string): Promise<ImageInput[]> {
-  const inputs: ImageInput[] = [];
+  const validatedInputs: Array<{ path: string; mimeType: string }> = [];
+  const seenPaths = new Set<string>();
+  let totalBytes = 0;
   const workspaceRoot = resolve(cwd);
+  let realWorkspaceRoot: string | undefined;
   for (const rawPath of paths ?? []) {
     const trimmed = rawPath.trim();
     if (!trimmed) continue;
@@ -196,11 +217,23 @@ async function readImageInputs(paths: string[] | undefined, cwd: string): Promis
       throw new Error(
         `Image input must be a file inside the current workspace: ${displayPath(path)}`,
       );
-    await validateImageInput(path, workspaceRoot);
-    const data = (await readFile(path)).toString("base64");
-    inputs.push({ path, data, mimeType: imageMimeType(path) });
+    realWorkspaceRoot ??= await realpath(workspaceRoot).catch(() => workspaceRoot);
+    const input = await validateImageInput(path, realWorkspaceRoot);
+    if (seenPaths.has(input.path)) continue;
+    if (validatedInputs.length >= MAX_IMAGE_INPUTS)
+      throw new Error(`Too many image inputs (max ${MAX_IMAGE_INPUTS}).`);
+    totalBytes += input.size;
+    if (totalBytes > MAX_TOTAL_IMAGE_INPUT_BYTES)
+      throw new Error("Image inputs are too large in total (max 50 MB).");
+    seenPaths.add(input.path);
+    validatedInputs.push({ path: input.path, mimeType: input.mimeType });
   }
-  return inputs;
+  return Promise.all(
+    validatedInputs.map(async (input) => ({
+      ...input,
+      data: (await readFile(input.path)).toString("base64"),
+    })),
+  );
 }
 
 function resolveSaveDir(
@@ -210,14 +243,10 @@ function resolveSaveDir(
 ): string | undefined {
   if (mode === "none") return undefined;
   if (mode === "project") return join(cwd, ".pi", "generated-images");
-  if (mode === "global")
-    return join(
-      process.env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), ".pi", "agent"),
-      "generated-images",
-    );
+  if (mode === "global") return join(piAgentDir(), "generated-images");
   const dir = params.saveDir?.trim() || process.env.PI_IMAGE_SAVE_DIR?.trim();
   if (!dir) throw new Error("save=custom requires saveDir or PI_IMAGE_SAVE_DIR.");
-  return dir;
+  return resolveUserPath(dir, cwd);
 }
 
 async function saveImage(
@@ -342,19 +371,19 @@ async function parseSseForImage(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  let lastImage: ExtractedImageResult | undefined;
   try {
     while (true) {
       if (signal?.aborted) throw new Error("Image request was aborted.");
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-      let idx = buffer.indexOf("\n\n");
-      while (idx !== -1) {
+      let boundary = SSE_EVENT_BOUNDARY.exec(buffer);
+      while (boundary) {
+        const idx = boundary.index;
         const chunk = buffer.slice(0, idx);
-        buffer = buffer.slice(idx + 2);
+        buffer = buffer.slice(idx + boundary[0].length);
         const data = chunk
-          .split("\n")
+          .split(/\r?\n/)
           .filter((line) => line.startsWith("data:"))
           .map((line) => line.slice(5).trim())
           .join("\n")
@@ -367,12 +396,9 @@ async function parseSseForImage(
             event = undefined;
           }
           const image = extractImageFromEvent(event, fallbackMimeType);
-          if (image?.data) {
-            lastImage = image;
-            if (image.status === "completed") {
-              await reader.cancel().catch(() => undefined);
-              return image;
-            }
+          if (image?.data && image.status === "completed") {
+            await reader.cancel().catch(() => undefined);
+            return image;
           }
           if (isRecord(event) && event.type === "response.failed") {
             const error =
@@ -391,13 +417,12 @@ async function parseSseForImage(
             throw new Error(`Codex image error: ${message}`);
           }
         }
-        idx = buffer.indexOf("\n\n");
+        boundary = SSE_EVENT_BOUNDARY.exec(buffer);
       }
     }
   } finally {
     reader.releaseLock();
   }
-  if (lastImage?.status === "completed") return lastImage;
   throw new Error("No completed image_generation_call result returned by Codex.");
 }
 
@@ -408,14 +433,16 @@ async function requestCodexImage(
   requestSignal?: AbortSignal,
 ): Promise<CodexImageResult> {
   if (!cfg.image.enabled) throw new Error("OpenAI image generation is disabled in config.");
-  const credentials = await getCredentials(ctx);
+  const cwd = ctx.cwd || process.cwd();
   const model = resolveModel(params, ctx, cfg);
   const { action, outputFormat, save } = resolveImageConfig(cfg, params);
-  const images = await readImageInputs(params.images, ctx.cwd || process.cwd());
-  const request = buildRequest(params, model, cfg, images);
+  const saveDir = resolveSaveDir(save, params, cwd);
   const timeoutSignal = AbortSignal.timeout(cfg.image.timeoutMs);
   const baseSignal = requestSignal ?? ctx.signal;
   const signal = baseSignal ? AbortSignal.any([baseSignal, timeoutSignal]) : timeoutSignal;
+  const credentials = await getCredentials(ctx, signal);
+  const images = await readImageInputs(params.images, cwd);
+  const request = buildRequest(params, model, cfg, images);
   const response = await fetch(CODEX_RESPONSES_URL, {
     method: "POST",
     headers: {
@@ -441,7 +468,6 @@ async function requestCodexImage(
     imageMimeType(`image.${outputFormat}`, outputFormat),
     signal,
   );
-  const saveDir = resolveSaveDir(save, params, ctx.cwd || process.cwd());
   const savedPath = saveDir
     ? await saveImage(parsed.data, outputFormat, saveDir, parsed.id)
     : undefined;
@@ -454,37 +480,6 @@ function displayPath(path: string): string {
   if (path === home) return "~";
   const homePrefix = home.endsWith(sep) ? home : `${home}${sep}`;
   return path.startsWith(homePrefix) ? `~/${path.slice(homePrefix.length)}` : path;
-}
-
-function textFromMessageContent(content: unknown): string | undefined {
-  if (typeof content === "string") return content.trim() || undefined;
-  if (!Array.isArray(content)) return undefined;
-  const text = content
-    .filter((part) => isRecord(part) && part.type === "text" && typeof part.text === "string")
-    .map((part) => (part as { text: string }).text)
-    .join("\n")
-    .trim();
-  return text || undefined;
-}
-
-function latestUserPromptFromEntries(entries: unknown[]): string | undefined {
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const entry = entries[i];
-    if (
-      !isRecord(entry) ||
-      entry.type !== "message" ||
-      !isRecord(entry.message) ||
-      entry.message.role !== "user"
-    )
-      continue;
-    const text = textFromMessageContent(entry.message.content);
-    if (text) return text;
-  }
-  return undefined;
-}
-
-function resolveToolPrompt(params: ToolParams, ctx: ExtensionContext): string {
-  return latestUserPromptFromEntries(ctx.sessionManager.getEntries()) ?? params.prompt;
 }
 
 function resultText(result: CodexImageResult): string {
@@ -544,63 +539,57 @@ export function registerOpenAIImage(
     };
   }
 
-  void import("@mariozechner/pi-tui")
-    .then(({ Box, Container, Image, Text }) => {
-      pi.registerMessageRenderer<CodexImageResult>("openai-image", (message, _options, theme) => {
-        const result = message.details;
-        const text =
-          result && isRecord(result)
-            ? resultText(result as CodexImageResult)
-            : typeof message.content === "string"
-              ? message.content
-              : message.content
-                  .filter((part) => part.type === "text")
-                  .map((part) => part.text)
-                  .join("\n");
-        let image: { data: string; mimeType: string; savedPath?: string } | undefined;
-        if (
-          result &&
-          isRecord(result) &&
-          typeof result.data === "string" &&
-          typeof result.mimeType === "string"
-        ) {
-          image = {
-            data: result.data,
-            mimeType: result.mimeType,
-            savedPath: typeof result.savedPath === "string" ? result.savedPath : undefined,
-          };
-        } else if (Array.isArray(message.content)) {
-          const imagePart = message.content.find(isImageContent);
-          if (imagePart) image = { data: imagePart.data, mimeType: imagePart.mimeType };
-        }
+  pi.registerMessageRenderer<CodexImageResult>("openai-image", (message, _options, theme) => {
+    const result = message.details;
+    const text =
+      result && isRecord(result)
+        ? resultText(result as CodexImageResult)
+        : typeof message.content === "string"
+          ? message.content
+          : message.content
+              .filter((part) => part.type === "text")
+              .map((part) => part.text)
+              .join("\n");
+    let image: { data: string; mimeType: string; savedPath?: string } | undefined;
+    if (
+      result &&
+      isRecord(result) &&
+      typeof result.data === "string" &&
+      typeof result.mimeType === "string"
+    ) {
+      image = {
+        data: result.data,
+        mimeType: result.mimeType,
+        savedPath: typeof result.savedPath === "string" ? result.savedPath : undefined,
+      };
+    } else if (Array.isArray(message.content)) {
+      const imagePart = message.content.find(isImageContent);
+      if (imagePart) image = { data: imagePart.data, mimeType: imagePart.mimeType };
+    }
 
-        const container = new Container();
-        const box = new Box(1, 1, (line) => theme.bg("customMessageBg", line));
-        box.addChild(
-          new Text(`${theme.fg("accent", theme.bold("[openai-image]"))}\n\n${text}`, 0, 0),
-        );
-        if (image) {
-          box.addChild(
-            new Image(
-              image.data,
-              image.mimeType,
-              { fallbackColor: (line) => theme.fg("dim", line) },
-              {
-                maxWidthCells: 80,
-                maxHeightCells: 24,
-                filename:
-                  "savedPath" in image && typeof image.savedPath === "string"
-                    ? image.savedPath
-                    : undefined,
-              },
-            ),
-          );
-        }
-        container.addChild(box);
-        return container;
-      });
-    })
-    .catch(() => undefined);
+    const container = new Container();
+    const box = new Box(1, 1, (line) => theme.bg("customMessageBg", line));
+    box.addChild(new Text(`${theme.fg("accent", theme.bold("[openai-image]"))}\n\n${text}`, 0, 0));
+    if (image) {
+      box.addChild(
+        new Image(
+          image.data,
+          image.mimeType,
+          { fallbackColor: (line) => theme.fg("dim", line) },
+          {
+            maxWidthCells: 80,
+            maxHeightCells: 24,
+            filename:
+              "savedPath" in image && typeof image.savedPath === "string"
+                ? image.savedPath
+                : undefined,
+          },
+        ),
+      );
+    }
+    container.addChild(box);
+    return container;
+  });
 
   pi.registerCommand(OPENAI_IMAGE_COMMAND, {
     description: "Generate an image with OpenAI Codex image generation",
@@ -639,7 +628,6 @@ export function registerOpenAIImage(
     async execute(_toolCallId, params: ToolParams, signal, onUpdate, ctx) {
       const cfg = getConfig(ctx);
       const model = resolveModel(params, ctx, cfg);
-      const requestParams = { ...params, prompt: resolveToolPrompt(params, ctx) };
       onUpdate?.({
         content: [
           {
@@ -649,7 +637,7 @@ export function registerOpenAIImage(
         ],
         details: undefined,
       });
-      const result = await generate(requestParams, ctx, signal);
+      const result = await generate(params, ctx, signal);
       return {
         content: [
           { type: "text", text: resultText(result) },
@@ -669,11 +657,12 @@ export const _imageTest = {
   OPENAI_IMAGE_TOOL,
   OPENAI_IMAGE_COMMAND,
   MAX_IMAGE_INPUT_BYTES,
+  MAX_IMAGE_INPUTS,
+  MAX_TOTAL_IMAGE_INPUT_BYTES,
   extractAccountIdFromJwt,
   imageMimeType,
   dataUrlParts,
   extractImageFromEvent,
   displayPath,
-  latestUserPromptFromEntries,
   buildRequest,
 };
