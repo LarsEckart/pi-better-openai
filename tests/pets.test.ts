@@ -424,7 +424,7 @@ describe("Codex pets helpers", () => {
       level: "info",
     });
 
-    const noReadyPrompt = _test.formatPetSelectPrompt([pets[1]], "/tmp/codex");
+    const noReadyPrompt = _test.formatPetSelectPrompt([pets[1]!], "/tmp/codex");
     expect(noReadyPrompt.level).toBe("warning");
     expect(noReadyPrompt.message).toContain("Found custom Codex pets, but none are ready.");
   });

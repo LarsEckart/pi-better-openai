@@ -55,11 +55,16 @@ export class UsageController {
   private sessionAbortSignal: AbortSignal | undefined;
   private sessionAbortHandler: (() => void) | undefined;
   private sessionGeneration = 0;
+  private readonly getConfig: (ctx: ExtensionContext) => ResolvedConfig;
+  private readonly updateFooter: (ctx: ExtensionContext) => void;
 
   constructor(
-    private readonly getConfig: (ctx: ExtensionContext) => ResolvedConfig,
-    private readonly updateFooter: (ctx: ExtensionContext) => void,
-  ) {}
+    getConfig: (ctx: ExtensionContext) => ResolvedConfig,
+    updateFooter: (ctx: ExtensionContext) => void,
+  ) {
+    this.getConfig = getConfig;
+    this.updateFooter = updateFooter;
+  }
 
   get snapshot(): UsageSnapshot | undefined {
     return this.usageSnapshot;

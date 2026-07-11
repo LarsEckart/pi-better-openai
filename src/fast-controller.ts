@@ -40,8 +40,11 @@ export class FastController {
   private lastInjectedAt: number | undefined;
   private lastInjectedModel: string | undefined;
   private lastInjectedTier: string | undefined;
+  private readonly serviceTier: string;
 
-  constructor(private readonly serviceTier: string) {}
+  constructor(serviceTier: string) {
+    this.serviceTier = serviceTier;
+  }
 
   applyDesiredState(ctx: ExtensionContext, cfg: ResolvedConfig): void {
     this.active = this.desiredActive && supportsFast(ctx, cfg.supportedModels);

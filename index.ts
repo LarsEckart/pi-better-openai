@@ -4,7 +4,6 @@
  * Adds `service_tier: "priority"` to OpenAI provider payloads while fast mode is
  * enabled and the selected model is in the configured allow-list.
  */
-import { sep } from "node:path";
 import {
   getSettingsListTheme,
   type ExtensionAPI,
@@ -33,7 +32,6 @@ import {
   type SettingsOptionDescriptor,
   configPaths,
   type ResolvedConfig,
-  type PetPlacement,
   type PetState,
   isRecord,
   parseModelKey,
@@ -65,6 +63,13 @@ import {
 import { FastController, modelList, supportsFast } from "./src/fast-controller.ts";
 import { UsageController } from "./src/usage-controller.ts";
 import { PetFooterController } from "./src/pet-footer-controller.ts";
+import {
+  abbreviateHomePath,
+  combineInlinePetFooter,
+  isInlinePetPlacement,
+  isTerminalImageLine,
+  petSizeCellsForPlacement,
+} from "./src/footer-layout.ts";
 
 const COMMAND = "fast";
 const OPENAI_STATUS_COMMAND = "openai-usage";
@@ -84,26 +89,8 @@ type SettingsPickerItem = {
   ) => { render(width: number): string[]; invalidate(): void; handleInput?(data: string): void };
 };
 
-function abbreviateHomePath(
-  path: string,
-  home = process.env.HOME || process.env.USERPROFILE,
-): string {
-  if (!home) return path;
-  if (path === home) return "~";
-  const homePrefix = home.endsWith(sep) ? home : `${home}${sep}`;
-  return path.startsWith(homePrefix) ? `~/${path.slice(homePrefix.length)}` : path;
-}
-
-function isInlinePetPlacement(placement: PetPlacement): boolean {
-  return placement === "inline-left" || placement === "inline-right" || placement === "badge";
-}
-
 function hasTerminalUI(ctx: ExtensionContext): boolean {
   return ctx.mode === "tui" || (ctx.mode === undefined && ctx.hasUI);
-}
-
-function petSizeCellsForPlacement(placement: PetPlacement, sizeCells: number): number {
-  return placement === "badge" ? Math.min(6, sizeCells) : sizeCells;
 }
 
 function readyPetPickerValues(pets: CodexPetPackage[]): string[] | undefined {
@@ -131,8 +118,8 @@ function petPickerDescription(cfg: ResolvedConfig, pets: CodexPetPackage[]): str
   if (readyPets.length === 0)
     return "No ready custom pets found. Use /pets help to create one, then return here.";
   if (!cfg.pets.slug) {
-    const firstPet = readyPets[0];
-    const lastPet = readyPets[readyPets.length - 1];
+    const firstPet = readyPets[0]!;
+    const lastPet = readyPets[readyPets.length - 1]!;
     return `No pet selected. Enter/Space/→ selects ${firstPet.name}; ← selects ${lastPet.name}.`;
   }
   const selectedPet = findPickerPet(cfg.pets.slug, readyPets);
@@ -167,84 +154,6 @@ function formatPetSelectPrompt(
     );
   }
   return { message: lines.join("\n"), level: "info" };
-}
-
-function spaces(width: number): string {
-  return " ".repeat(Math.max(0, width));
-}
-
-function padTextToWidth(value: string, width: number): string {
-  return value + spaces(width - visibleWidth(value));
-}
-
-function isTerminalImageLine(line: string): boolean {
-  return line.includes("\x1b_G") || line.includes("\x1b]1337;File=");
-}
-
-function petLineCell(line: string, width: number): string {
-  if (!line) return spaces(width);
-  if (isTerminalImageLine(line)) return `\x1b[0m${line}`;
-  const clipped = truncateToWidth(line, width, "");
-  return clipped + spaces(width - visibleWidth(clipped));
-}
-
-function stripLeadingCursorUp(line: string): string {
-  if (!line.startsWith("\x1b[")) return line;
-  const end = line.indexOf("A", 2);
-  if (end === -1) return line;
-  return /^\d+$/.test(line.slice(2, end)) ? line.slice(end + 1) : line;
-}
-
-function stripTrailingCursorDown(line: string): string {
-  if (!line.endsWith("B")) return line;
-  const start = line.lastIndexOf("\x1b[");
-  if (start === -1) return line;
-  return /^\d+$/.test(line.slice(start + 2, -1)) ? line.slice(0, start) : line;
-}
-
-function terminalImageInlineLeftSequence(line: string, totalRows: number): string {
-  const moveUp = totalRows > 1 ? `\x1b[${totalRows - 1}A` : "";
-  const moveDown = totalRows > 1 ? `\x1b[${totalRows - 1}B` : "";
-  const balancedLine = stripTrailingCursorDown(stripLeadingCursorUp(line));
-  return `\x1b[0m\r${moveUp}${balancedLine}${moveDown}`;
-}
-
-function combineInlinePetFooter(
-  petLines: string[],
-  textLines: string[],
-  width: number,
-  placement: PetPlacement,
-  petWidth: number,
-): string[] {
-  const gap = 2;
-  const textWidth = Math.max(1, width - petWidth - gap);
-  const totalRows = Math.max(petLines.length, textLines.length);
-  const petStart = 0;
-  const textStart = 0;
-  const hasTerminalImageLine = petLines.some(isTerminalImageLine);
-  const leftImageLine =
-    placement === "inline-left" ? petLines.find(isTerminalImageLine) : undefined;
-  const renderPetOnRight =
-    placement === "inline-right" || (placement !== "inline-left" && hasTerminalImageLine);
-  const lines: string[] = [];
-
-  for (let row = 0; row < totalRows; row++) {
-    const petLine = row >= petStart ? (petLines[row - petStart] ?? "") : "";
-    const textLine = row >= textStart ? (textLines[row - textStart] ?? "") : "";
-    const textPart = truncateToWidth(textLine, textWidth, "...");
-    const petPart = leftImageLine ? spaces(petWidth) : petLineCell(petLine, petWidth);
-    if (renderPetOnRight) {
-      lines.push(`${padTextToWidth(textPart, textWidth)}${spaces(gap)}${petPart}`);
-    } else {
-      lines.push(`${petPart}${spaces(gap)}${textPart}`);
-    }
-  }
-
-  if (leftImageLine && lines.length > 0) {
-    lines[lines.length - 1] += terminalImageInlineLeftSequence(leftImageLine, totalRows);
-  }
-
-  return lines;
 }
 
 function textPanel(title: string, lines: string[], done: () => void) {

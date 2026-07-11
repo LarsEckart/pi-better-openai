@@ -117,12 +117,19 @@ export class PetFooterController {
   private requestFooterRender: (() => void) | undefined;
   private requestSettingsRender: (() => void) | undefined;
   private shuttingDown = false;
+  private readonly getConfig: (ctx: ExtensionContext) => ResolvedConfig;
+  private readonly updateFooter: (ctx: ExtensionContext) => void;
+  private readonly getFooterInstalled: () => boolean;
 
   constructor(
-    private readonly getConfig: (ctx: ExtensionContext) => ResolvedConfig,
-    private readonly updateFooter: (ctx: ExtensionContext) => void,
-    private readonly getFooterInstalled: () => boolean = () => false,
-  ) {}
+    getConfig: (ctx: ExtensionContext) => ResolvedConfig,
+    updateFooter: (ctx: ExtensionContext) => void,
+    getFooterInstalled: () => boolean = () => false,
+  ) {
+    this.getConfig = getConfig;
+    this.updateFooter = updateFooter;
+    this.getFooterInstalled = getFooterInstalled;
+  }
 
   get loadedPet(): LoadedCodexPet | undefined {
     return this.pet;
@@ -237,6 +244,14 @@ export class PetFooterController {
       if (firstKey === undefined) break;
       this.petRenderCache.delete(firstKey);
     }
+  }
+
+  private recallRender(key: string): string[] | undefined {
+    const lines = this.petRenderCache.get(key);
+    if (!lines) return undefined;
+    this.petRenderCache.delete(key);
+    this.petRenderCache.set(key, lines);
+    return lines;
   }
 
   isResizeFrozen(now = Date.now()): boolean {
@@ -568,7 +583,7 @@ export class PetFooterController {
             options.petColumnWidth,
             options.petRenderSizeCells,
           );
-          const cachedPetLines = this.petRenderCache.get(cacheKey);
+          const cachedPetLines = this.recallRender(cacheKey);
           if (cachedPetLines) {
             petLines.push(...cachedPetLines);
             return petLines;

@@ -296,7 +296,11 @@ function buildRequest(
 
 function dataUrlParts(value: string, fallbackMimeType: string): { data: string; mimeType: string } {
   const match = value.match(/^data:([^;,]+);base64,(.*)$/s);
-  if (match) return { mimeType: match[1] || fallbackMimeType, data: match[2].trim() };
+  if (match)
+    return {
+      mimeType: match[1] || fallbackMimeType,
+      data: (match[2] ?? "").trim(),
+    };
   return { data: value.trim(), mimeType: fallbackMimeType };
 }
 

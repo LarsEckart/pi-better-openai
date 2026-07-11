@@ -276,7 +276,8 @@ async function readCodexPetPackages(
   const readNext = async (): Promise<void> => {
     while (nextIndex < entries.length) {
       const index = nextIndex++;
-      pets[index] = await readCodexPetPackage(petsDir, entries[index], options);
+      const entry = entries[index];
+      if (entry) pets[index] = await readCodexPetPackage(petsDir, entry, options);
     }
   };
   await Promise.all(
@@ -622,7 +623,7 @@ export function nextAnimationFrameDelayMs(
     if (cursor < duration) return Math.max(1, Math.ceil(duration - cursor));
     cursor -= duration;
   }
-  return Math.max(1, Math.ceil(frames[0].durationMs));
+  return Math.max(1, Math.ceil(frames[0]!.durationMs));
 }
 
 function forEachCodexPetFrame(
@@ -691,8 +692,11 @@ function encodeKittyRawRgba(frame: PetFrame, imageId: number): string {
 export class CodexPetKittyManager {
   private previousFrameImageId: number | undefined;
   private readonly pendingCleanupImageIds = new Set<number>();
+  readonly placementImageId: number;
 
-  constructor(readonly placementImageId: number) {}
+  constructor(placementImageId: number) {
+    this.placementImageId = placementImageId;
+  }
 
   queueCleanup(pet?: LoadedCodexPet): void {
     for (const imageId of codexPetKittyImageIds(pet)) this.pendingCleanupImageIds.add(imageId);

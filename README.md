@@ -4,6 +4,8 @@ A pi extension for OpenAI subscription workflows: fast mode, usage visibility, f
 
 ## Install
 
+Requires Node.js 22.19.0 or newer.
+
 Install from GitHub:
 
 ```bash
@@ -154,7 +156,7 @@ Then reload Codex skills (`Cmd/Ctrl+K → Force Reload Skills`) and ask:
 $hatch-pet create a new pet inspired by pi-better-openai
 ```
 
-Custom pets should end up in `${CODEX_HOME:-~/.codex}/pets/<pet-name>/` with `pet.json` and `spritesheet.webp`. Refresh custom pets in Codex settings and toggle the overlay with `/pet`.
+Custom pets should end up in `${CODEX_HOME:-~/.codex}/pets/<pet-name>/` with `pet.json` and `spritesheet.webp`. The spritesheet must be a 1536×1872 atlas arranged as 8 columns by 9 animation rows. Animated footer rendering also requires a terminal image protocol supported by pi. Refresh custom pets in Codex settings and toggle the overlay with `/pet`.
 
 ## Screenshots
 
