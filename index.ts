@@ -60,7 +60,12 @@ import {
   registerOpenAIPets,
   _petsTest,
 } from "./src/pets.ts";
-import { FastController, modelList, supportsFast } from "./src/fast-controller.ts";
+import {
+  FastController,
+  isFastEligibleProvider,
+  modelList,
+  supportsFast,
+} from "./src/fast-controller.ts";
 import { UsageController } from "./src/usage-controller.ts";
 import { PetFooterController } from "./src/pet-footer-controller.ts";
 import {
@@ -1149,7 +1154,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
       fastController.active !== nextConfig.active
     )
       persist(nextConfig);
-    if (fastController.desiredActive && !fastController.active) {
+    if (fastController.desiredActive && !fastController.active && isFastEligibleProvider(ctx)) {
       ctx.ui.notify(fastController.unsupportedRequestMessage(ctx, nextConfig), "warning");
     }
     if (hasTerminalUI(ctx)) petController.installResizeGuard(ctx);
@@ -1217,12 +1222,14 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     fastController.applyDesiredState(ctx, cfg);
     if (fastController.active !== wasActive) {
       persist(cfg);
-      ctx.ui.notify(
-        fastController.active
-          ? fastController.stateText(ctx, cfg)
-          : fastController.inactiveForModelMessage(ctx),
-        fastController.active ? "info" : "warning",
-      );
+      if (fastController.active || isFastEligibleProvider(ctx)) {
+        ctx.ui.notify(
+          fastController.active
+            ? fastController.stateText(ctx, cfg)
+            : fastController.inactiveForModelMessage(ctx),
+          fastController.active ? "info" : "warning",
+        );
+      }
     }
     updateFooter(ctx);
     void usageController.refresh(ctx, event.model.id, { force: true });

@@ -14,6 +14,13 @@ export function supportsFast(ctx: ExtensionContext, supportedModels: SupportedMo
   );
 }
 
+const FAST_PROVIDERS = new Set(["openai", "openai-codex"]);
+
+export function isFastEligibleProvider(ctx: ExtensionContext): boolean {
+  const provider = ctx.model?.provider;
+  return typeof provider === "string" && FAST_PROVIDERS.has(provider);
+}
+
 export function modelList(supportedModels: SupportedModel[]): string {
   return supportedModels.length > 0
     ? supportedModels.map((model) => `${model.provider}/${model.id}`).join(", ")
