@@ -5,6 +5,7 @@ import {
   AUTH_FILE,
   type UsageSnapshot,
   formatResetCountdown,
+  hasUsageLimits,
   formatUsageSnapshot,
   parseUsageSnapshot,
   readCodexAuth,
@@ -78,6 +79,7 @@ export class UsageController {
     return this.usageSnapshot &&
       !this.usageError &&
       this.usageSnapshot.scope === usageScopeForModel(ctx.model?.id) &&
+      hasUsageLimits(this.usageSnapshot) &&
       cfg.usage.enabled &&
       isOpenAISubscriptionModel(ctx, cfg, isUsingOAuth)
       ? formatUsageSnapshot(this.usageSnapshot, cfg.usage)
@@ -92,6 +94,9 @@ export class UsageController {
     if (this.usageError) return `Usage unavailable: ${this.usageError}`;
     if (!this.usageSnapshot || this.usageSnapshot.scope !== usageScopeForModel(ctx.model?.id))
       return "Usage unavailable.";
+    if (!hasUsageLimits(this.usageSnapshot)) {
+      return "Usage limits are not exposed for this account.";
+    }
     const stale =
       this.usageUpdatedAt && Date.now() - this.usageUpdatedAt > cfg.usage.refreshIntervalMs * 2
         ? ` | stale ${formatResetCountdown((Date.now() - this.usageUpdatedAt) / 1000)}`

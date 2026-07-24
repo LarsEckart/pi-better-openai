@@ -229,6 +229,10 @@ export function formatPercent(value: number | null): string {
     : "--";
 }
 
+export function hasUsageLimits(snapshot: UsageSnapshot): boolean {
+  return snapshot.fiveHourLeftPercent !== null || snapshot.sevenDayLeftPercent !== null;
+}
+
 export function formatUsageSnapshot(
   snapshot: UsageSnapshot,
   options: { showResetTimes: boolean },

@@ -443,6 +443,31 @@ describe("usage polling lifecycle", () => {
     await emit(harness, "session_shutdown");
   });
 
+  test("hides usage status when the API exposes neither limit window", async () => {
+    const fetchMock = stubUsageFetch(
+      () => new Response(JSON.stringify({ rate_limit: { allowed: true } })),
+    );
+    const harness = await createUsageHarness({
+      usageConfig: {
+        enabled: true,
+        refreshIntervalMs: 60000,
+        showOnlyOnSubscriptionModels: true,
+      },
+      isUsingOAuth: true,
+    });
+
+    await emit(harness, "session_start");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    expect(harness.ctx.ui.setStatus).not.toHaveBeenCalled();
+    await harness.commands.get("openai-usage")?.handler("", harness.ctx);
+    expect(harness.ctx.ui.notify).toHaveBeenLastCalledWith(
+      "Usage limits are not exposed for this account.",
+      "info",
+    );
+    await emit(harness, "session_shutdown");
+  });
+
   test("stops interval polling when the session signal aborts", async () => {
     vi.useFakeTimers();
     const abortController = new AbortController();
