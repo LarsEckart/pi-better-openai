@@ -178,6 +178,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   const fastController = new FastController(SERVICE_TIER);
   let cachedConfig: ResolvedConfig | undefined;
   let footerTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+  let latestCacheHitRate: number | undefined;
   let footerInstalled = false;
   let statusInstalled = false;
   let contextUsageCached = false;
@@ -236,13 +237,18 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
 
   function refreshFooterTotals(ctx: ExtensionContext): void {
     footerTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+    latestCacheHitRate = undefined;
     for (const entry of ctx.sessionManager.getEntries()) {
       if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-      footerTotals.input += entry.message.usage.input;
-      footerTotals.output += entry.message.usage.output;
-      footerTotals.cacheRead += entry.message.usage.cacheRead;
-      footerTotals.cacheWrite += entry.message.usage.cacheWrite;
-      footerTotals.cost += entry.message.usage.cost.total;
+      const { usage } = entry.message;
+      footerTotals.input += usage.input;
+      footerTotals.output += usage.output;
+      footerTotals.cacheRead += usage.cacheRead;
+      footerTotals.cacheWrite += usage.cacheWrite;
+      footerTotals.cost += usage.cost.total;
+
+      const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+      latestCacheHitRate = promptTokens > 0 ? (usage.cacheRead / promptTokens) * 100 : undefined;
     }
   }
 
@@ -946,6 +952,9 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
           if (totalOutput) parts.push(`↓${formatTokens(totalOutput)}`);
           if (totalCacheRead) parts.push(`R${formatTokens(totalCacheRead)}`);
           if (totalCacheWrite) parts.push(`W${formatTokens(totalCacheWrite)}`);
+          if ((totalCacheRead > 0 || totalCacheWrite > 0) && latestCacheHitRate !== undefined) {
+            parts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
+          }
 
           const usingSubscription = ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false;
           if (totalCost || usingSubscription)
@@ -1189,11 +1198,14 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   pi.on("turn_end", (event, ctx) => {
     invalidateContextUsage();
     if (event.message?.role === "assistant") {
-      footerTotals.input += event.message.usage.input;
-      footerTotals.output += event.message.usage.output;
-      footerTotals.cacheRead += event.message.usage.cacheRead;
-      footerTotals.cacheWrite += event.message.usage.cacheWrite;
-      footerTotals.cost += event.message.usage.cost.total;
+      const { usage } = event.message;
+      footerTotals.input += usage.input;
+      footerTotals.output += usage.output;
+      footerTotals.cacheRead += usage.cacheRead;
+      footerTotals.cacheWrite += usage.cacheWrite;
+      footerTotals.cost += usage.cost.total;
+      const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+      latestCacheHitRate = promptTokens > 0 ? (usage.cacheRead / promptTokens) * 100 : undefined;
     } else refreshFooterTotals(ctx);
     updateFooter(ctx);
     void usageController.refresh(ctx);

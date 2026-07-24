@@ -239,7 +239,7 @@ describe("footer mode ownership", () => {
       { fg: (_color: string, value: string) => value },
       {},
     );
-    expect(footer.render(100).join("\n")).toContain("↑1.2k ↓300 R400 W50 $0.250");
+    expect(footer.render(100).join("\n")).toContain("↑1.2k ↓300 R400 W50 CH24.2% $0.250");
     footer.dispose();
   });
 
